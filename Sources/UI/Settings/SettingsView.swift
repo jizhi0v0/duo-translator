@@ -10,6 +10,8 @@ struct SettingsView: View {
                 .tabItem { Label("通用", systemImage: "gearshape") }
             EngineSettingsView(settings: settings)
                 .tabItem { Label("引擎", systemImage: "engine.combustion") }
+            OCRSettingsView(settings: settings)
+                .tabItem { Label("OCR", systemImage: "text.viewfinder") }
             HotkeySettingsView()
                 .tabItem { Label("快捷键", systemImage: "keyboard") }
         }

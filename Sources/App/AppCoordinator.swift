@@ -34,13 +34,33 @@ final class AppCoordinator {
     }
 
     func ocrTranslate() {
-        Log.app.info("ocrTranslate triggered")
-        // M3: screenshot -> OCR -> auto translate.
+        runOCR(autoTranslate: true)
     }
 
     func ocrToInput() {
-        Log.app.info("ocrToInput triggered")
-        // M3: screenshot -> OCR -> editable input.
+        runOCR(autoTranslate: false)
+    }
+
+    private func runOCR(autoTranslate: Bool) {
+        Task { @MainActor in
+            do {
+                let result = try await ScreenshotCapturer.captureRegion()
+                guard case .image(let image) = result else { return }
+                let settings = SettingsStore.shared
+                let text = try await TextRecognizer.recognize(
+                    image,
+                    languages: settings.ocrLanguages,
+                    mergeParagraphs: settings.ocrMergesLines
+                )
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    panel.showNotice("没有识别到文字。")
+                    return
+                }
+                panel.showInput(prefill: text, autoTranslate: autoTranslate)
+            } catch {
+                panel.showNotice(error.localizedDescription)
+            }
+        }
     }
 
     func openSettings() {

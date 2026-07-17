@@ -12,6 +12,7 @@ final class SettingsStore: ObservableObject {
         static let secondLanguage = "secondLanguage"
         static let engineProfiles = "engineProfiles"
         static let ocrLanguages = "ocrLanguages"
+        static let ocrMergesLines = "ocrMergesLines"
     }
 
     @Published var firstLanguage: String {
@@ -26,6 +27,9 @@ final class SettingsStore: ObservableObject {
     @Published var ocrLanguages: [String] {
         didSet { defaults.set(ocrLanguages, forKey: Keys.ocrLanguages) }
     }
+    @Published var ocrMergesLines: Bool {
+        didSet { defaults.set(ocrMergesLines, forKey: Keys.ocrMergesLines) }
+    }
 
     let defaults: UserDefaults
 
@@ -34,6 +38,7 @@ final class SettingsStore: ObservableObject {
         firstLanguage = defaults.string(forKey: Keys.firstLanguage) ?? "zh-Hans"
         secondLanguage = defaults.string(forKey: Keys.secondLanguage) ?? "en"
         ocrLanguages = defaults.stringArray(forKey: Keys.ocrLanguages) ?? ["zh-Hans", "zh-Hant", "en-US", "ja"]
+        ocrMergesLines = defaults.object(forKey: Keys.ocrMergesLines) as? Bool ?? true
 
         if let data = defaults.data(forKey: Keys.engineProfiles),
            let profiles = try? JSONDecoder().decode([EngineProfile].self, from: data) {
