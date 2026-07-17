@@ -12,12 +12,22 @@ final class EngineRunModel: ObservableObject, Identifiable {
 
     let id: String
     let name: String
+    let kind: EngineKind
     let stream = StreamingTextModel()
+    /// Reasoning/thinking output (reasoning models only).
+    let thinkingStream = StreamingTextModel()
     @Published var state: RunState = .streaming
+    /// Set once the engine emits any reasoning; gates the collapsible section.
+    @Published var hasThinking = false
+    /// User-toggled disclosure state; thinking starts collapsed.
+    @Published var thinkingExpanded = false
+    /// Token usage parsed from the stream, if the provider reported it.
+    var usage: (prompt: Int?, completion: Int?, total: Int?)?
 
-    init(id: String, name: String) {
+    init(id: String, name: String, kind: EngineKind) {
         self.id = id
         self.name = name
+        self.kind = kind
     }
 }
 
@@ -56,21 +66,23 @@ final class TranslationRunController: ObservableObject {
         targetLanguage = target
 
         let request = TranslationRequest(text: trimmed, sourceLanguage: detected, targetLanguage: target)
+        let profiles = settings.enabledProfiles
         let engines = EngineFactory.makeEngines(settings: settings, keychain: keychain)
 
         guard !engines.isEmpty else {
-            let run = EngineRunModel(id: "none", name: "未配置引擎")
+            let run = EngineRunModel(id: "none", name: "未配置引擎", kind: .openAICompat)
             run.state = .failed(message: "请在设置中启用并配置至少一个翻译引擎。")
             runs = [run]
             selectedRunID = run.id
             return
         }
 
-        runs = engines.map { EngineRunModel(id: $0.id, name: $0.displayName) }
+        runs = zip(profiles, engines).map { EngineRunModel(id: $1.id, name: $1.displayName, kind: $0.kind) }
         if selectedRunID == nil || !runs.contains(where: { $0.id == selectedRunID }) {
             selectedRunID = runs.first?.id
         }
 
+        let inputChars = trimmed.count
         tasks = zip(engines, runs).map { engine, run in
             Task { [weak run] in
                 let started = Date()
@@ -80,24 +92,65 @@ final class TranslationRunController: ObservableObject {
                         switch event {
                         case .delta(let chunk):
                             run.stream.append(chunk)
+                        case .reasoning(let chunk):
+                            run.hasThinking = true
+                            run.thinkingStream.append(chunk)
                         case .replace(let text):
                             run.stream.replaceAll(text)
+                        case .usage(let prompt, let completion, let total):
+                            run.usage = (prompt, completion, total)
                         case .done:
                             break
                         }
                     }
                     guard let run else { return }
                     run.stream.finish()
-                    run.state = .done(seconds: Date().timeIntervalSince(started))
+                    run.thinkingStream.finish()
+                    let seconds = Date().timeIntervalSince(started)
+                    run.state = .done(seconds: seconds)
+                    Self.record(run, source: detected, target: target,
+                                inputChars: inputChars, duration: seconds, status: .success)
                 } catch is CancellationError {
-                    // silent
+                    Log.engine.debug("run cancelled, connection torn down")
+                    if let run {
+                        Self.record(run, source: detected, target: target, inputChars: inputChars,
+                                    duration: Date().timeIntervalSince(started), status: .cancelled)
+                    }
                 } catch {
                     guard let run else { return }
                     run.stream.finish()
+                    run.thinkingStream.finish()
                     run.state = .failed(message: error.localizedDescription)
+                    Self.record(run, source: detected, target: target, inputChars: inputChars,
+                                duration: Date().timeIntervalSince(started), status: .failed)
                 }
             }
         }
+    }
+
+    /// Append one metadata-only record to the stats store (no text bodies).
+    private static func record(
+        _ run: EngineRunModel,
+        source: String?,
+        target: String,
+        inputChars: Int,
+        duration: Double,
+        status: RecordStatus
+    ) {
+        StatsStore.shared.add(TranslationRecord(
+            date: Date(),
+            engineKind: run.kind.rawValue,
+            engineName: run.name,
+            source: source,
+            target: target,
+            inputChars: inputChars,
+            outputChars: run.stream.fullText.count,
+            promptTokens: run.usage?.prompt,
+            completionTokens: run.usage?.completion,
+            totalTokens: run.usage?.total,
+            durationSeconds: duration,
+            status: status
+        ))
     }
 
     func cancelAll() {

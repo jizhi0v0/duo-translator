@@ -5,6 +5,7 @@ import AppKit
 @MainActor
 final class AppCoordinator {
     private var settingsWindow: SettingsWindowController?
+    private var statsWindow: StatsWindowController?
     private lazy var panel = PanelController()
 
     // MARK: - Actions
@@ -68,5 +69,12 @@ final class AppCoordinator {
             settingsWindow = SettingsWindowController()
         }
         settingsWindow?.show()
+    }
+
+    func openStats() {
+        if statsWindow == nil {
+            statsWindow = StatsWindowController()
+        }
+        statsWindow?.show()
     }
 }

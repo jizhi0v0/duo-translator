@@ -8,11 +8,15 @@ struct TranslationRequest: Sendable {
     let targetLanguage: String
 }
 
-enum TranslationEvent: Sendable {
+enum TranslationEvent: Sendable, Equatable {
     /// Streamed append (LLM engines).
     case delta(String)
+    /// Streamed reasoning/thinking append (reasoning models).
+    case reasoning(String)
     /// Whole-result replacement (non-streaming engines like DeepL / Apple).
     case replace(String)
+    /// Token usage, if the provider reports it. Any field may be nil.
+    case usage(prompt: Int?, completion: Int?, total: Int?)
     case done
 }
 

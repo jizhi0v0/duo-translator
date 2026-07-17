@@ -181,6 +181,10 @@ struct EngineResultView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if engineRun.hasThinking {
+                thinkingSection
+                Divider()
+            }
             StreamingTextView(
                 model: engineRun.stream,
                 onContentHeightChange: onContentHeightChange
@@ -188,6 +192,34 @@ struct EngineResultView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             statusBar
+        }
+    }
+
+    @ViewBuilder
+    private var thinkingSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                engineRun.thinkingExpanded.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: engineRun.thinkingExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                    Text("思考过程")
+                        .font(.caption)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
+            if engineRun.thinkingExpanded {
+                StreamingTextView(model: engineRun.thinkingStream, fontSize: 12)
+                    .frame(maxWidth: .infinity, minHeight: 60, maxHeight: 160)
+                    .opacity(0.75)
+            }
         }
     }
 

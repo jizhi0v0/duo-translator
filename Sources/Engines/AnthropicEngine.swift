@@ -18,6 +18,8 @@ struct AnthropicEngine: TranslationEngine {
 
         return AsyncThrowingStream { continuation in
             let task = Task {
+                var inputTokens: Int?
+                var outputTokens: Int?
                 do {
                     for try await event in SSEClient.events(for: urlRequest) {
                         guard let data = event.data.data(using: .utf8),
@@ -26,18 +28,41 @@ struct AnthropicEngine: TranslationEngine {
                         }
                         switch obj["type"] as? String {
                         case "content_block_delta":
-                            if let delta = obj["delta"] as? [String: Any],
-                               delta["type"] as? String == "text_delta",
-                               let text = delta["text"] as? String,
-                               !text.isEmpty {
-                                continuation.yield(.delta(text))
+                            if let delta = obj["delta"] as? [String: Any] {
+                                switch delta["type"] as? String {
+                                case "text_delta":
+                                    if let text = delta["text"] as? String, !text.isEmpty {
+                                        continuation.yield(.delta(text))
+                                    }
+                                case "thinking_delta":
+                                    if let text = delta["thinking"] as? String, !text.isEmpty {
+                                        continuation.yield(.reasoning(text))
+                                    }
+                                default:
+                                    break
+                                }
+                            }
+                        case "message_start":
+                            if let message = obj["message"] as? [String: Any],
+                               let usage = message["usage"] as? [String: Any] {
+                                inputTokens = usage["input_tokens"] as? Int
+                            }
+                        case "message_delta":
+                            // Cumulative output token count lives at the event
+                            // top level in message_delta.
+                            if let usage = obj["usage"] as? [String: Any] {
+                                outputTokens = usage["output_tokens"] as? Int ?? outputTokens
                             }
                         case "error":
                             let message = (obj["error"] as? [String: Any])?["message"] as? String ?? "未知错误"
                             throw EngineError.unsupported(message)
                         default:
-                            break // message_start / message_delta / ping / …
+                            break // ping / content_block_start / stop / …
                         }
+                    }
+                    if inputTokens != nil || outputTokens != nil {
+                        let total = (inputTokens ?? 0) + (outputTokens ?? 0)
+                        continuation.yield(.usage(prompt: inputTokens, completion: outputTokens, total: total))
                     }
                     continuation.yield(.done)
                     continuation.finish()

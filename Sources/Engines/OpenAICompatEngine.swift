@@ -26,11 +26,8 @@ struct OpenAICompatEngine: TranslationEngine {
                               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                             continue
                         }
-                        if let choices = obj["choices"] as? [[String: Any]],
-                           let delta = choices.first?["delta"] as? [String: Any],
-                           let content = delta["content"] as? String,
-                           !content.isEmpty {
-                            continuation.yield(.delta(content))
+                        for translationEvent in Self.events(fromChatFrame: obj) {
+                            continuation.yield(translationEvent)
                         }
                     }
                     continuation.yield(.done)
@@ -41,6 +38,32 @@ struct OpenAICompatEngine: TranslationEngine {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// Translate one decoded chat-completions SSE frame into events. Content and
+    /// reasoning deltas plus any usage block; provider-specific reasoning keys
+    /// (`reasoning_content` for DeepSeek, `reasoning` for OpenRouter) are both
+    /// accepted so we stay engine-agnostic.
+    static func events(fromChatFrame obj: [String: Any]) -> [TranslationEvent] {
+        var events: [TranslationEvent] = []
+        if let choices = obj["choices"] as? [[String: Any]],
+           let delta = choices.first?["delta"] as? [String: Any] {
+            if let content = delta["content"] as? String, !content.isEmpty {
+                events.append(.delta(content))
+            }
+            if let reasoning = (delta["reasoning_content"] as? String)
+                ?? (delta["reasoning"] as? String), !reasoning.isEmpty {
+                events.append(.reasoning(reasoning))
+            }
+        }
+        if let usage = obj["usage"] as? [String: Any] {
+            events.append(.usage(
+                prompt: usage["prompt_tokens"] as? Int,
+                completion: usage["completion_tokens"] as? Int,
+                total: usage["total_tokens"] as? Int
+            ))
+        }
+        return events
     }
 
     private func buildRequest(_ request: TranslationRequest) throws -> URLRequest {
