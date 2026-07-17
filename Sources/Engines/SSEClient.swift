@@ -34,6 +34,9 @@ enum SSEClient {
 
                     var eventName: String?
                     for try await line in bytes.lines {
+                        // Abort promptly when the run is cancelled (ESC / window
+                        // close / re-translate) instead of draining the stream.
+                        try Task.checkCancellation()
                         if line.hasPrefix("data:") {
                             let data = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
                             continuation.yield(SSEEvent(event: eventName, data: data))
