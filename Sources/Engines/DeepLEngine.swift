@@ -43,7 +43,7 @@ struct DeepLEngine: TranslationEngine {
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
         urlRequest.timeoutInterval = 60
 
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        let (data, response) = try await HTTPClient.shared.data(for: urlRequest)
         guard let http = response as? HTTPURLResponse else {
             throw EngineError.decoding("非 HTTP 响应")
         }

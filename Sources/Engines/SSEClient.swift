@@ -14,7 +14,7 @@ struct SSEEvent: Sendable {
 enum SSEClient {
     static func events(
         for request: URLRequest,
-        session: URLSession = .shared
+        session: URLSession = HTTPClient.shared
     ) -> AsyncThrowingStream<SSEEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
