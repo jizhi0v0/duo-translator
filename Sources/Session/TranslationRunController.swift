@@ -32,14 +32,22 @@ final class TranslationRunController: ObservableObject {
 
     private var tasks: [Task<Void, Never>] = []
 
-    func start(text: String, settings: SettingsStore, keychain: KeychainStore) {
+    /// `sourceOverride` / `targetOverride` come from the panel's language menus
+    /// (a manual re-translate); when nil the languages are auto-detected.
+    func start(
+        text: String,
+        settings: SettingsStore,
+        keychain: KeychainStore,
+        sourceOverride: String? = nil,
+        targetOverride: String? = nil
+    ) {
         cancelAll()
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        let detected = LanguagePolicy.detect(trimmed)
-        let target = LanguagePolicy.target(
+        let detected = sourceOverride ?? LanguagePolicy.detect(trimmed)
+        let target = targetOverride ?? LanguagePolicy.target(
             for: trimmed,
             first: settings.firstLanguage,
             second: settings.secondLanguage

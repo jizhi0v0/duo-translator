@@ -41,11 +41,9 @@ struct PanelRootView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Text(viewModel.languageBadge)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
+        HStack(spacing: 6) {
+            languageControls
+            Spacer(minLength: 8)
             Button {
                 viewModel.copySelectedResult()
             } label: {
@@ -62,6 +60,44 @@ struct PanelRootView: View {
             .help(viewModel.isPinned ? "取消固定" : "固定窗口（点击其他区域不关闭）")
         }
         .padding(.top, 16) // keep clear of the traffic-light close button
+    }
+
+    /// Source → target language menus with swap + re-translate. Selections are
+    /// temporary; changing them does nothing until re-translate is pressed.
+    private var languageControls: some View {
+        HStack(spacing: 4) {
+            languageMenu(selection: $viewModel.selectedSource)
+            Button {
+                viewModel.swapLanguages()
+            } label: {
+                Image(systemName: "arrow.left.arrow.right")
+            }
+            .buttonStyle(.borderless)
+            .help("互换源/目标语言")
+            languageMenu(selection: $viewModel.selectedTarget)
+            Button {
+                viewModel.retranslate()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .help("重新翻译（会打断当前请求）")
+            .disabled(viewModel.selectedTarget.isEmpty)
+        }
+        .font(.caption)
+    }
+
+    private func languageMenu(selection: Binding<String>) -> some View {
+        Menu {
+            ForEach(viewModel.languageOptions(including: selection.wrappedValue), id: \.self) { code in
+                Button(LanguagePolicy.localizedName(for: code)) { selection.wrappedValue = code }
+            }
+        } label: {
+            Text(selection.wrappedValue.isEmpty ? "自动" : LanguagePolicy.localizedName(for: selection.wrappedValue))
+                .lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
     }
 
     private var inputEditor: some View {
