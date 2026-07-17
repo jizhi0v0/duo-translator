@@ -5,11 +5,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var coordinator: AppCoordinator!
     private var statusItem: StatusItemController!
     private var hotkeys: HotkeyManager!
+    private var editKeyMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // LSUIElement apps have no visible menu bar, but a main menu must still
         // exist for ⌘C/⌘V/⌘A/⌘Z key equivalents to reach text fields.
         NSApp.mainMenu = Self.buildMainMenu()
+
+        // Belt and suspenders: menu key-equivalent routing for accessory apps
+        // has been flaky across macOS versions, so intercept the standard edit
+        // shortcuts ourselves and dispatch straight to the first responder.
+        editKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            Self.handleEditKeyEquivalent(event) ? nil : event
+        }
 
         coordinator = AppCoordinator()
         statusItem = StatusItemController(coordinator: coordinator)
@@ -20,6 +28,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
+
+    /// Returns true when the event was consumed (action found a responder).
+    private static func handleEditKeyEquivalent(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard let key = event.charactersIgnoringModifiers?.lowercased() else { return false }
+
+        let action: Selector?
+        switch (key, flags) {
+        case ("v", [.command]): action = #selector(NSText.paste(_:))
+        case ("c", [.command]): action = #selector(NSText.copy(_:))
+        case ("x", [.command]): action = #selector(NSText.cut(_:))
+        case ("a", [.command]): action = #selector(NSText.selectAll(_:))
+        case ("z", [.command]): action = Selector(("undo:"))
+        case ("z", [.command, .shift]): action = Selector(("redo:"))
+        default: action = nil
+        }
+        guard let action else { return false }
+        return NSApp.sendAction(action, to: nil, from: nil)
+    }
 
     private static func buildMainMenu() -> NSMenu {
         let mainMenu = NSMenu()
