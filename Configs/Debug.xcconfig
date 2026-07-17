@@ -1,0 +1,10 @@
+#include "Shared.xcconfig"
+
+// Sign Debug builds with the real Apple Development certificate so the code
+// signature stays stable across rebuilds — otherwise macOS TCC (Accessibility /
+// Screen Recording) grants reset on every build.
+// Identity pinned by SHA-1 hash because two revoked certificates with a similar
+// name exist in the keychain ("Apple Development: 1123157557@qq.com").
+CODE_SIGN_IDENTITY = F81CE822EAF587A11E7A705AD4940AE767E39E72
+ENABLE_HARDENED_RUNTIME = NO
+SWIFT_OPTIMIZATION_LEVEL = -Onone

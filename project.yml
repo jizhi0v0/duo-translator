@@ -1,0 +1,43 @@
+name: DuoTranslator
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "15.0"
+
+packages:
+  KeyboardShortcuts:
+    url: https://github.com/sindresorhus/KeyboardShortcuts
+    from: "2.0.0"
+
+configFiles:
+  Debug: Configs/Debug.xcconfig
+  Release: Configs/Release.xcconfig
+
+targets:
+  DuoTranslator:
+    type: application
+    platform: macOS
+    sources:
+      - Sources
+    configFiles:
+      Debug: Configs/Debug.xcconfig
+      Release: Configs/Release.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.bobby.DuoTranslator
+        PRODUCT_NAME: DuoTranslator
+        INFOPLIST_FILE: Configs/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Configs/DuoTranslator.entitlements
+    dependencies:
+      - package: KeyboardShortcuts
+    scheme:
+      testTargets:
+        - DuoTranslatorTests
+
+  DuoTranslatorTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests
+    dependencies:
+      - target: DuoTranslator
