@@ -86,6 +86,12 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.orderOut(nil)
     }
 
+    /// Show the panel with a transient notice (capture failures, hints).
+    func showNotice(_ message: String) {
+        showInput()
+        viewModel.notice = message
+    }
+
     private func positionNearMouse() {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main

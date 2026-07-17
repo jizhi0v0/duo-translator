@@ -7,10 +7,13 @@ final class PanelViewModel: ObservableObject {
     @Published var isPinned = false
     /// Bumped to re-focus the input editor when the panel is shown.
     @Published var focusToken = 0
+    /// Transient error / hint shown under the header.
+    @Published var notice: String?
 
     let run = TranslationRunController()
 
     func translate() {
+        notice = nil
         run.start(text: inputText, settings: .shared, keychain: .shared)
     }
 

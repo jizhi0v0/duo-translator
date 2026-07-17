@@ -15,6 +15,19 @@ struct PanelRootView: View {
                 .padding(.top, 6)
                 .padding(.bottom, 6)
 
+            if let notice = viewModel.notice {
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                    Text(notice)
+                        .lineLimit(2)
+                    Spacer()
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
+            }
+
             inputEditor
                 .padding(.horizontal, 12)
 

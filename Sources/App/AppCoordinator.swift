@@ -19,8 +19,18 @@ final class AppCoordinator {
     }
 
     func translateSelection() {
-        Log.app.info("translateSelection triggered")
-        // M2: capture selected text, then translate.
+        Task { @MainActor in
+            do {
+                // Capture before showing the panel so focus is still in the
+                // source app.
+                let text = try await SelectedTextProvider.capture()
+                translateText(text)
+            } catch SelectedTextProvider.CaptureError.accessibilityDenied {
+                PermissionCenter.requestAccessibility()
+            } catch {
+                panel.showNotice(error.localizedDescription)
+            }
+        }
     }
 
     func ocrTranslate() {
