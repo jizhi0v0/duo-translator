@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 final class TranslatorPanel: NSPanel {
@@ -11,6 +12,15 @@ final class TranslatorPanel: NSPanel {
     }
 }
 
+/// Hosting view that lets the window be dragged from any empty SwiftUI region.
+/// Interactive controls (text fields, buttons) return `false` from
+/// `mouseDownCanMoveWindow` on their own, so they still receive their clicks;
+/// only the empty background hits this view, which reports `true` and hands the
+/// drag to AppKit via `isMovableByWindowBackground`.
+final class DraggableHostingView<Content: View>: NSHostingView<Content> {
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
 /// Owns the floating translator panel: positioning near the mouse, key-window
 /// behavior without activating the app, outside-click dismissal, pinning, and
 /// content-driven height growth.
@@ -20,19 +30,21 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     private var panel: TranslatorPanel!
     private var clickMonitor: Any?
-    /// Once the user resizes manually, stop auto-growing until the next run.
-    private var userAdjustedHeight = false
+    private var runsObserver: AnyCancellable?
 
     /// Height of everything that isn't the streaming result text.
     private static let chromeHeight: CGFloat = 220
     private static let defaultSize = NSSize(width: 500, height: 360)
+    /// Hard ceiling for content-driven growth. Beyond this the result area
+    /// scrolls instead of the window getting taller (also clamped to the screen).
+    private static let maxHeight: CGFloat = 640
 
     override init() {
         super.init()
 
         panel = TranslatorPanel(
             contentRect: NSRect(origin: .zero, size: Self.defaultSize),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView, .nonactivatingPanel],
+            styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -59,7 +71,13 @@ final class PanelController: NSObject, NSWindowDelegate {
             },
             onClose: { [weak self] in self?.close() }
         )
-        panel.contentView = NSHostingView(rootView: root)
+        panel.contentView = DraggableHostingView(rootView: root)
+
+        // Each translation replaces the runs array; reset to the default height
+        // then let growForContent expand for the new content, so a short result
+        // after a long one snaps back cleanly instead of shrinking gradually.
+        runsObserver = viewModel.run.$runs
+            .sink { [weak self] _ in self?.resetToDefaultHeight() }
     }
 
     // MARK: - Presentation
@@ -68,9 +86,8 @@ final class PanelController: NSObject, NSWindowDelegate {
         if let prefill {
             viewModel.inputText = prefill
         }
-        userAdjustedHeight = false
         if !panel.isVisible {
-            positionNearMouse()
+            centerOnActiveScreen()
         }
         panel.makeKeyAndOrderFront(nil)
         installClickMonitor()
@@ -92,26 +109,33 @@ final class PanelController: NSObject, NSWindowDelegate {
         viewModel.notice = message
     }
 
-    private func positionNearMouse() {
+    /// Center the panel on whichever screen the pointer is on (falls back to the
+    /// main screen). Growth from `growForContent` expands downward from here.
+    private func centerOnActiveScreen() {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
         guard let visible = screen?.visibleFrame else { return }
 
-        var origin = NSPoint(x: mouse.x + 8, y: mouse.y - Self.defaultSize.height - 8)
-        origin.x = min(max(origin.x, visible.minX + 8), visible.maxX - Self.defaultSize.width - 8)
-        origin.y = min(max(origin.y, visible.minY + 8), visible.maxY - Self.defaultSize.height - 8)
-        panel.setFrame(NSRect(origin: origin, size: Self.defaultSize), display: false)
+        let size = Self.defaultSize
+        let origin = NSPoint(
+            x: visible.midX - size.width / 2,
+            y: visible.midY - size.height / 2
+        )
+        panel.setFrame(NSRect(origin: origin, size: size), display: false)
     }
 
+    /// Grow the panel to fit the streamed text, but never past `maxHeight` (also
+    /// clamped to the screen). Grow-only: shrinking is handled once per run by
+    /// `resetToDefaultHeight`, so the window doesn't creep down while streaming.
     private func growForContent(textHeight: CGFloat) {
-        guard panel.isVisible, !userAdjustedHeight, !panel.inLiveResize else { return }
+        guard panel.isVisible, !panel.inLiveResize else { return }
         guard let screen = panel.screen ?? NSScreen.main else { return }
 
-        let maxHeight = screen.visibleFrame.height * 0.6
-        let desired = min(max(Self.chromeHeight + textHeight, Self.defaultSize.height), maxHeight)
+        let ceiling = min(Self.maxHeight, screen.visibleFrame.height * 0.9)
+        let desired = min(max(Self.chromeHeight + textHeight, Self.defaultSize.height), ceiling)
         var frame = panel.frame
         let delta = desired - frame.height
-        guard abs(delta) > 4 else { return }
+        guard delta > 4 else { return }
         frame.origin.y -= delta
         frame.size.height = desired
 
@@ -123,6 +147,21 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.setFrame(frame, display: true, animate: false)
     }
 
+    /// Snap back to the default height with the top edge fixed. Called when a
+    /// new translation run begins so content sizes fresh each time.
+    private func resetToDefaultHeight() {
+        guard panel.isVisible else { return }
+        var frame = panel.frame
+        let delta = Self.defaultSize.height - frame.height
+        guard abs(delta) > 1 else { return }
+        frame.origin.y -= delta // keep the top edge in place
+        frame.size.height = Self.defaultSize.height
+        if let visible = (panel.screen ?? NSScreen.main)?.visibleFrame, frame.maxY > visible.maxY {
+            frame.origin.y = visible.maxY - frame.height
+        }
+        panel.setFrame(frame, display: true, animate: false)
+    }
+
     // MARK: - Dismissal
 
     private func installClickMonitor() {
@@ -130,6 +169,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.viewModel.isPinned else { return }
+                // A click that lands inside the panel's own frame (e.g. a corner
+                // or a pass-through region the window didn't opaquely capture)
+                // must not dismiss it — only genuine outside clicks close.
+                if self.panel.frame.contains(NSEvent.mouseLocation) { return }
                 self.close()
             }
         }
@@ -143,10 +186,6 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     // MARK: - NSWindowDelegate
-
-    func windowDidEndLiveResize(_ notification: Notification) {
-        userAdjustedHeight = true
-    }
 
     func windowWillClose(_ notification: Notification) {
         removeClickMonitor()

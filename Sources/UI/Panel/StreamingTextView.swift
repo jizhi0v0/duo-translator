@@ -48,18 +48,21 @@ struct StreamingTextView: NSViewRepresentable {
         scrollView.documentView = textView
         scrollView.contentView.postsBoundsChangedNotifications = true
 
-        context.coordinator.attach(
+        context.coordinator.setup(
             scrollView: scrollView,
             textView: textView,
             attributes: attributes,
-            model: model,
             onContentHeightChange: onContentHeightChange
         )
+        context.coordinator.bindModel(model)
         return scrollView
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.onContentHeightChange = onContentHeightChange
+        // Each translation run hands the view a fresh StreamingTextModel; without
+        // rebinding, only the first run would ever render.
+        context.coordinator.bindModel(model)
     }
 
     @MainActor
@@ -70,12 +73,13 @@ struct StreamingTextView: NSViewRepresentable {
         private var isFollowing = true
         var onContentHeightChange: ((CGFloat) -> Void)?
         private var lastReportedHeight: CGFloat = 0
+        private weak var model: StreamingTextModel?
 
-        func attach(
+        /// One-time wiring of the views and scroll observer.
+        func setup(
             scrollView: NSScrollView,
             textView: NSTextView,
             attributes: [NSAttributedString.Key: Any],
-            model: StreamingTextModel,
             onContentHeightChange: ((CGFloat) -> Void)?
         ) {
             self.scrollView = scrollView
@@ -83,24 +87,33 @@ struct StreamingTextView: NSViewRepresentable {
             self.attributes = attributes
             self.onContentHeightChange = onContentHeightChange
 
-            // The view may attach after content already streamed in.
-            if !model.fullText.isEmpty {
-                append(model.fullText)
-            }
-
-            model.onAppend = { [weak self] chunk in
-                self?.append(chunk)
-            }
-            model.onReset = { [weak self] in
-                self?.resetText()
-            }
-
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(userScrolled(_:)),
                 name: NSScrollView.didLiveScrollNotification,
                 object: scrollView
             )
+        }
+
+        /// Attach to the run's text model. Called on every SwiftUI update; each
+        /// translation run supplies a new model, so we detach the old one, clear
+        /// the view, and replay whatever the new model already buffered.
+        func bindModel(_ newModel: StreamingTextModel) {
+            guard newModel !== model else { return }
+            model?.onAppend = nil
+            model?.onReset = nil
+            model = newModel
+
+            resetText()
+            if !newModel.fullText.isEmpty {
+                append(newModel.fullText)
+            }
+            newModel.onAppend = { [weak self] chunk in
+                self?.append(chunk)
+            }
+            newModel.onReset = { [weak self] in
+                self?.resetText()
+            }
         }
 
         private func append(_ chunk: String) {
