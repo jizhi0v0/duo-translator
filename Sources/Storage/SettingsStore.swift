@@ -52,6 +52,20 @@ final class SettingsStore: ObservableObject {
         engineProfiles.filter(\.enabled)
     }
 
+    /// Re-read every published value from UserDefaults after CloudSync applied
+    /// remote changes. Assignments re-fire didSet, but writing an identical
+    /// value back to defaults is harmless and CloudSync skips no-op pushes.
+    func reloadFromDefaults() {
+        firstLanguage = defaults.string(forKey: Keys.firstLanguage) ?? firstLanguage
+        secondLanguage = defaults.string(forKey: Keys.secondLanguage) ?? secondLanguage
+        ocrLanguages = defaults.stringArray(forKey: Keys.ocrLanguages) ?? ocrLanguages
+        ocrMergesLines = defaults.object(forKey: Keys.ocrMergesLines) as? Bool ?? ocrMergesLines
+        if let data = defaults.data(forKey: Keys.engineProfiles),
+           let profiles = try? JSONDecoder().decode([EngineProfile].self, from: data) {
+            engineProfiles = profiles
+        }
+    }
+
     private func persistProfiles() {
         if let data = try? JSONEncoder().encode(engineProfiles) {
             defaults.set(data, forKey: Keys.engineProfiles)

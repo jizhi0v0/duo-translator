@@ -7,4 +7,7 @@
 // name exist in the keychain ("Apple Development: 1123157557@qq.com").
 CODE_SIGN_IDENTITY = F81CE822EAF587A11E7A705AD4940AE767E39E72
 ENABLE_HARDENED_RUNTIME = NO
+// M5: set this to the name of the Development provisioning profile (with
+// iCloud capability) once it exists, e.g.:
+// PROVISIONING_PROFILE_SPECIFIER = DuoTranslator Development
 SWIFT_OPTIMIZATION_LEVEL = -Onone

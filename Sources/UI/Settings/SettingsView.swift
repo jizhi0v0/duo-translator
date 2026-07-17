@@ -14,6 +14,8 @@ struct SettingsView: View {
                 .tabItem { Label("OCR", systemImage: "text.viewfinder") }
             HotkeySettingsView()
                 .tabItem { Label("快捷键", systemImage: "keyboard") }
+            SyncSettingsView()
+                .tabItem { Label("同步", systemImage: "icloud") }
         }
         .frame(width: 640, height: 460)
     }

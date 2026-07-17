@@ -2,5 +2,7 @@
 
 CODE_SIGN_IDENTITY = Developer ID Application
 ENABLE_HARDENED_RUNTIME = YES
+// M5: set this to the Developer ID provisioning profile name once it exists:
+// PROVISIONING_PROFILE_SPECIFIER = DuoTranslator Developer ID
 OTHER_CODE_SIGN_FLAGS = --timestamp
 SWIFT_OPTIMIZATION_LEVEL = -O

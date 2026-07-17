@@ -10,6 +10,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         coordinator = AppCoordinator()
         statusItem = StatusItemController(coordinator: coordinator)
         hotkeys = HotkeyManager(coordinator: coordinator)
+
+        KeychainStore.shared.preferSynchronizable = CloudSync.hasKeychainGroupsEntitlement
+        CloudSync.shared.start(settings: .shared)
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
