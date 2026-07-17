@@ -33,7 +33,9 @@ final class KeychainStore: @unchecked Sendable {
     }
 
     func setSecret(_ value: String?, for id: UUID) {
-        guard let value, !value.isEmpty else {
+        // Pasted keys often carry a trailing newline, which would corrupt the
+        // auth header rather than fail cleanly.
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
             deleteSecret(for: id)
             return
         }

@@ -22,7 +22,19 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(secondLanguage, forKey: Keys.secondLanguage) }
     }
     @Published var engineProfiles: [EngineProfile] {
-        didSet { persistProfiles() }
+        didSet {
+            let normalized = engineProfiles.map { profile -> EngineProfile in
+                var copy = profile
+                copy.normalize()
+                return copy
+            }
+            // Re-assigning re-enters didSet; the second pass is a no-op and stops here.
+            guard normalized == engineProfiles else {
+                engineProfiles = normalized
+                return
+            }
+            persistProfiles()
+        }
     }
     @Published var ocrLanguages: [String] {
         didSet { defaults.set(ocrLanguages, forKey: Keys.ocrLanguages) }

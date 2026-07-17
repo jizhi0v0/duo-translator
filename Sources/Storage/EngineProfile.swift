@@ -34,6 +34,14 @@ struct EngineProfile: Codable, Identifiable, Hashable, Sendable {
     Output only the translation, with no explanations and no quotes around it.
     """
 
+    /// Values pasted into the settings fields routinely carry a trailing
+    /// newline, which the APIs reject verbatim (`invalid model ID`).
+    mutating func normalize() {
+        name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func makeDefault(kind: EngineKind) -> EngineProfile {
         switch kind {
         case .openAICompat:
