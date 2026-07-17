@@ -37,6 +37,7 @@ struct PanelRootView: View {
             resultArea
         }
         .frame(minWidth: 380, minHeight: 260)
+        .background(AppleTranslationHostView())
     }
 
     private var header: some View {

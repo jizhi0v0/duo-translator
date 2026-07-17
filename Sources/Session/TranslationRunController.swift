@@ -95,6 +95,8 @@ final class TranslationRunController: ObservableObject {
     func cancelAll() {
         tasks.forEach { $0.cancel() }
         tasks = []
+        // The Apple bridge's continuation doesn't observe task cancellation.
+        AppleTranslationBridge.shared.cancelPending()
     }
 
     func clear() {

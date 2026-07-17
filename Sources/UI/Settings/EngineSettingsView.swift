@@ -62,8 +62,7 @@ struct EngineSettingsView: View {
         }
     }
 
-    /// M1 only ships the OpenAI-compatible engine; the rest arrive in M4.
-    private var availableKinds: [EngineKind] { [.openAICompat] }
+    private var availableKinds: [EngineKind] { EngineKind.allCases }
 
     @ViewBuilder
     private var detail: some View {
