@@ -5,12 +5,17 @@ import AppKit
 @MainActor
 final class AppCoordinator {
     private var settingsWindow: SettingsWindowController?
+    private lazy var panel = PanelController()
 
     // MARK: - Actions
 
     func openInputWindow() {
-        Log.app.info("openInputWindow triggered")
-        // M1: show translator panel in input mode.
+        panel.showInput()
+    }
+
+    /// Shared entry for selection / OCR flows (M2 / M3).
+    func translateText(_ text: String) {
+        panel.showInput(prefill: text, autoTranslate: true)
     }
 
     func translateSelection() {

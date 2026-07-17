@@ -39,5 +39,9 @@ targets:
     platform: macOS
     sources:
       - Tests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.bobby.DuoTranslatorTests
     dependencies:
       - target: DuoTranslator
