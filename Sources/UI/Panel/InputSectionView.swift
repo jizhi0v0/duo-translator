@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The input editor with its accessory row: detected-language badge plus
-/// speak / copy actions for the source text.
+/// The input editor with a footer row (speak / copy of the source text) styled
+/// to match the result cards — a divider above a leading row of actions.
 struct InputSectionView: View {
     @ObservedObject var viewModel: PanelViewModel
     @ObservedObject var run: TranslationRunController
@@ -9,13 +9,20 @@ struct InputSectionView: View {
 
     @FocusState private var inputFocused: Bool
 
+    /// Fixed input height — a stable, proportioned box (longer text scrolls
+    /// inside it, keeping line breaks). The user preferred this over an
+    /// auto-growing editor for a clearer visual hierarchy.
+    private static let editorHeight: CGFloat = 125
+    private static let font = Font.system(size: 13)
+
     var body: some View {
         VStack(spacing: 0) {
             TextEditor(text: $viewModel.inputText)
-                .font(.system(size: 13))
+                .font(Self.font)
+                .lineSpacing(3)
                 .scrollContentBackground(.hidden)
                 .padding(6)
-                .frame(minHeight: 64, maxHeight: 110)
+                .frame(height: Self.editorHeight)
                 .focused($inputFocused)
                 .onKeyPress { press in
                     guard press.key == .return, !press.modifiers.contains(.shift) else {
@@ -31,7 +38,8 @@ struct InputSectionView: View {
                     inputFocused = true
                 }
 
-            accessoryRow
+            Divider().padding(.horizontal, 10)
+            footer
         }
         .background(
             RoundedRectangle(cornerRadius: 8)
@@ -43,19 +51,8 @@ struct InputSectionView: View {
         )
     }
 
-    private var accessoryRow: some View {
+    private var footer: some View {
         HStack(spacing: 10) {
-            if let detected = run.detectedLanguage {
-                Text("识别为 \(LanguagePolicy.localizedName(for: detected))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
-            }
-
-            Spacer()
-
             Button {
                 speech.toggle(
                     id: "input",
@@ -83,8 +80,16 @@ struct InputSectionView: View {
             .buttonStyle(.borderless)
             .help("复制原文")
             .disabled(viewModel.inputText.isEmpty)
+
+            Spacer()
+
+            Label("回车翻译", systemImage: "return")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .help("在输入框按回车即可翻译")
         }
-        .padding(.horizontal, 8)
-        .padding(.bottom, 6)
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
+        .padding(.bottom, 7)
     }
 }
