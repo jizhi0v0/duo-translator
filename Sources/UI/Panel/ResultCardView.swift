@@ -54,11 +54,17 @@ struct ResultCardView: View {
                             text: textHeight, min: Self.minBodyHeight, cap: maxBodyHeight))
                     .overlay(alignment: .topLeading) {
                         if isAwaitingContent {
+                            // Match the streamed text exactly — same 14pt size and
+                            // the NSTextView's 10/8 inset — so when the first chunk
+                            // replaces this placeholder the glyphs don't shift size
+                            // or position. Only the content (and its color) changes,
+                            // so the swap reads as a clean replacement instead of a
+                            // flicker where the text jumps as it turns white.
                             Text("翻译中…")
-                                .font(.callout)
+                                .font(.system(size: 14))
                                 .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 10)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
                         }
                     }
                     Divider().padding(.horizontal, 10)
@@ -72,13 +78,17 @@ struct ResultCardView: View {
             // the old (possibly maximal) value before the new text is measured.
             if awaiting { textHeight = Self.minBodyHeight }
         }
+        // A soft shadow lifts each card off the glass panel so the results read
+        // as distinct surfaces stacked above the chrome, not shapes blended into
+        // the same translucent background.
         .background(
             RoundedRectangle(cornerRadius: 10)
                 .fill(.thinMaterial)
+                .shadow(color: .black.opacity(0.16), radius: 5, y: 1)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Color.secondary.opacity(0.15))
+                .strokeBorder(Color.secondary.opacity(0.18))
         )
     }
 
@@ -95,8 +105,12 @@ struct ResultCardView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .frame(width: 10, alignment: .center)
+                    // Metadata, not content: kept in the secondary color so the
+                    // translation body below is the only prominent (label-color)
+                    // text in the card — clear primary/secondary hierarchy.
                     Text(engineRun.name)
-                        .font(.caption.weight(.medium))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
                     statusGlyph
                 }
                 .contentShape(Rectangle())
