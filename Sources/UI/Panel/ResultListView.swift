@@ -21,9 +21,13 @@ struct ResultListView: View {
     @ViewBuilder
     private var content: some View {
         if run.runs.isEmpty {
+            // Keep the placeholder's footprint stable, but hide its text while a
+            // notice toast is floating over this same spot — otherwise the two
+            // overlap (e.g. "没有识别到文字。" sitting on top of the hint).
             Text("回车翻译，Shift+回车换行")
                 .font(.callout)
                 .foregroundStyle(.tertiary)
+                .opacity(viewModel.notice == nil ? 1 : 0)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.vertical, 16)
         } else {
@@ -52,11 +56,15 @@ struct ResultListView: View {
     /// every card's header/footer stays visible (each body scrolls internally)
     /// rather than the whole stack overflowing the window.
     private var perCardMaxBody: CGFloat {
-        let count = max(run.runs.count, 1)
-        // Usable result-area height at the window's growth ceiling, minus each
-        // card's own header/footer overhead, split evenly across the cards.
-        let resultBudget: CGFloat = 480
-        let cardChrome: CGFloat = 82
-        return max(150, (resultBudget - CGFloat(count) * cardChrome) / CGFloat(count))
+        // Budget is the live result-area height (window ceiling − chrome),
+        // published by the panel, minus this view's own vertical padding (10+10).
+        // So the cards shrink when the input/chrome is tall and the total always
+        // fits — never pushing the bottom card off-screen with no scrollbar.
+        PanelLayout.perCardBodyMax(
+            count: run.runs.count,
+            budget: viewModel.resultAreaBudget - 20,
+            cardChrome: 82,
+            floor: 96
+        )
     }
 }

@@ -50,7 +50,8 @@ struct ResultCardView: View {
                     // reset. Once content lands, the measured height takes over.
                     .frame(height: isAwaitingContent
                         ? Self.minBodyHeight
-                        : min(max(textHeight, Self.minBodyHeight), maxBodyHeight))
+                        : PanelLayout.resolvedBodyHeight(
+                            text: textHeight, min: Self.minBodyHeight, cap: maxBodyHeight))
                     .overlay(alignment: .topLeading) {
                         if isAwaitingContent {
                             Text("翻译中…")
@@ -187,22 +188,13 @@ struct ResultCardView: View {
             } label: {
                 Image(systemName: speech.speakingID == engineRun.id ? "stop.fill" : "speaker.wave.2")
                     .font(.caption)
+                    .frame(width: FooterIcon.width, height: FooterIcon.height)
             }
             .buttonStyle(.borderless)
             .help(speech.speakingID == engineRun.id ? "停止朗读" : "朗读译文")
+            .accessibilityIdentifier("result.speak")
 
-            Button {
-                let text = engineRun.stream.fullText
-                guard !text.isEmpty else { return }
-                let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                pasteboard.setString(text, forType: .string)
-            } label: {
-                Image(systemName: "doc.on.doc")
-                    .font(.caption)
-            }
-            .buttonStyle(.borderless)
-            .help("复制译文")
+            CopyButton(text: engineRun.stream.fullText, help: "复制译文", identifier: "result.copy")
 
             Spacer()
         }

@@ -243,4 +243,23 @@ final class TranslationRunController: ObservableObject {
         detectedLanguage = nil
         targetLanguage = nil
     }
+
+    /// UI-test seam (driven by the `-uiTest` launch): replace the runs with
+    /// `count` completed cards carrying `text`, so tests can exercise the
+    /// result-area sizing/scrolling without a live translation. Inert unless
+    /// called from the UI-test launch path.
+    func uiTestSeedResults(count: Int, text: String) {
+        cancelAll()
+        let names = ["OpenAI", "Apple 翻译", "DeepL"]
+        runs = (0..<max(count, 1)).map { i in
+            let run = EngineRunModel(id: "uitest-\(i)", name: names[i % names.count], kind: .openAICompat)
+            run.stream.replaceAll(text)
+            run.stream.finish()
+            run.hasContent = true
+            run.state = .done(seconds: 0.5)
+            return run
+        }
+        detectedLanguage = "en"
+        targetLanguage = "zh-Hans"
+    }
 }

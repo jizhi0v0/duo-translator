@@ -14,6 +14,14 @@ final class AppCoordinator {
         panel.showInput()
     }
 
+    /// UI-test entry point (guarded by the `-uiTest` launch argument in
+    /// `AppDelegate`): shows the panel with deterministic seed text — and, when
+    /// `resultCount > 0`, that many fake completed result cards — so tests can
+    /// drive sizing/feedback/scrolling without simulating hotkeys or the network.
+    func uiTestShowPanel(seed: String, resultCount: Int = 0) {
+        panel.uiTestPresent(input: seed, resultCount: resultCount)
+    }
+
     /// Shared entry for selection / OCR flows (M2 / M3).
     func translateText(_ text: String) {
         panel.showInput(prefill: text, autoTranslate: true)

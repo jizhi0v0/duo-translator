@@ -39,7 +39,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// Initial estimate for the chrome above the result list; replaced by a
     /// live measurement once the view lays out.
     private static let chromeHeight: CGFloat = 240
-    private static let defaultSize = NSSize(width: 500, height: 360)
+    private static let defaultSize = NSSize(width: 400, height: 360)
     /// Floor for content-driven fit. Kept low so the empty / no-result state
     /// pulls in tight instead of leaving a blank block under the placeholder.
     private static let minFittedHeight: CGFloat = 220
@@ -50,10 +50,15 @@ final class PanelController: NSObject, NSWindowDelegate {
     private static let maxHeight: CGFloat = 760
     /// Margin kept above and below the panel when it fills a tall screen.
     private static let screenPadding: CGFloat = 24
-    /// Slack added to the fitted height: covers a slightly-short content
-    /// measurement (so the bottom card's footer never clips) and leaves a little
-    /// breathing room below the last card.
-    private static let fitBuffer: CGFloat = 36
+    /// Floor for the result-list budget (space left for cards after chrome), so
+    /// a very tall input still leaves the cards a usable, scrollable minimum.
+    private static let minResultBudget: CGFloat = 200
+    /// Small rounding-safety slack added to the fitted height so a sub-pixel
+    /// short measurement can't clip the bottom card's footer. Kept minimal: the
+    /// content measurement tracks the real rendered height exactly, so anything
+    /// larger just shows as dead space below the last card. If a late-arriving
+    /// measurement is genuinely taller, `refit` grows again to match.
+    private static let fitBuffer: CGFloat = 6
 
     override init() {
         super.init()
@@ -84,7 +89,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         // window itself must be transparent.
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.minSize = NSSize(width: 380, height: 280)
+        panel.minSize = NSSize(width: 304, height: 280)
         panel.delegate = self
         panel.onEscape = { [weak self] in self?.close() }
 
@@ -103,7 +108,15 @@ final class PanelController: NSObject, NSWindowDelegate {
             },
             onClose: { [weak self] in self?.close() }
         )
-        panel.contentView = DraggableHostingView(rootView: root)
+        let hostingView = DraggableHostingView(rootView: root)
+        // With `.titled` + `.fullSizeContentView` the hosting view otherwise
+        // inherits a top safe-area inset matching the (transparent) titlebar,
+        // which pushes the glass body down and leaves an invisible transparent
+        // strip at the very top of the window — dead space that also stops the
+        // glass from sitting flush at the top. Clear the safe-area regions so the
+        // glass fills to the true top edge.
+        hostingView.safeAreaRegions = []
+        panel.contentView = hostingView
     }
 
     // MARK: - Presentation
@@ -111,6 +124,16 @@ final class PanelController: NSObject, NSWindowDelegate {
     func showInput(prefill: String? = nil, autoTranslate: Bool = false) {
         if let prefill {
             viewModel.inputText = prefill
+            // Capture-to-input (取字, no auto translate) starts no run, so the
+            // previous run's result cards would linger under the new text — drop
+            // them. Don't clear on the auto-translate path: `translate()` →
+            // `run.start` replaces the results itself, and clearing here empties
+            // `runs`, which trips the `runs.isEmpty` "fresh panel" gate below and
+            // snaps the reused panel back to its default size (leaving a gap).
+            if !autoTranslate {
+                viewModel.run.clear()
+                viewModel.notice = nil
+            }
         }
         // Only place-and-size from scratch for a genuinely fresh panel. The
         // outside-click monitor orders the panel out (isVisible becomes false)
@@ -140,6 +163,23 @@ final class PanelController: NSObject, NSWindowDelegate {
         viewModel.run.cancelAll()
         removeClickMonitor()
         panel.orderOut(nil)
+    }
+
+    /// UI-test presentation: seed the input and optionally inject fake result
+    /// cards (long body text) so tests can verify the result area fits on screen
+    /// and scrolls. Seeds after showing so `showInput`'s clear doesn't wipe them;
+    /// the cards' geometry callbacks then drive `refit` as in a real translation.
+    func uiTestPresent(input: String, resultCount: Int) {
+        viewModel.inputText = input
+        showInput()
+        if resultCount > 0 {
+            viewModel.run.uiTestSeedResults(
+                count: resultCount,
+                text: String(repeating: "结果卡片正文，用于验证长译文时底部可以滚动、不会被遮挡。", count: 40)
+            )
+        } else {
+            viewModel.run.clear()
+        }
     }
 
     /// Show the panel with a transient notice (capture failures, hints). Clears
@@ -183,11 +223,26 @@ final class PanelController: NSObject, NSWindowDelegate {
 
         let visible = screen.visibleFrame
         let ceiling = min(Self.maxHeight, visible.height - Self.screenPadding * 2)
-        // Safety margin: the SwiftUI result-height measurement can land a hair
-        // short of the real rendered height (last card's footer), which clipped
-        // the bottom card. A small buffer guarantees the last card shows in full.
-        let content = chromeHeightMeasured + resultHeightMeasured + Self.fitBuffer
-        let desired = min(max(content, Self.minFittedHeight), ceiling)
+
+        // Publish how much height is actually left for the result list at this
+        // ceiling given the current chrome. The result cards cap their bodies to
+        // this, so a tall input shrinks the cards (they scroll internally) and
+        // the total always fits the window — instead of the bottom card being
+        // pushed off-screen with no reachable scrollbar.
+        let budget = max(Self.minResultBudget, ceiling - chromeHeightMeasured - Self.fitBuffer)
+        if abs(budget - viewModel.resultAreaBudget) > 1 {
+            viewModel.resultAreaBudget = budget
+        }
+
+        // Fit chrome + result (+ a small buffer so a hair-short measurement can't
+        // clip the last card), clamped to [minFittedHeight, ceiling].
+        let desired = PanelLayout.windowHeight(
+            chrome: chromeHeightMeasured,
+            result: resultHeightMeasured,
+            buffer: Self.fitBuffer,
+            floor: Self.minFittedHeight,
+            ceiling: ceiling
+        )
         guard abs(desired - panel.frame.height) > 4 else { return } // ignore jitter
 
         var frame = panel.frame
@@ -232,5 +287,60 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         removeClickMonitor()
+    }
+}
+
+/// Pure sizing math for the translator panel, factored out of the SwiftUI views
+/// so the height rules can be unit-tested across input lengths (empty → one line
+/// → many lines → overflow) without a running UI. No state, no actor isolation —
+/// just the formulas the views feed their live measurements into.
+enum PanelLayout {
+    /// Window height fitted to `chrome + result` (plus `buffer`), clamped to
+    /// `[floor, ceiling]`. Grows with content and never exceeds the ceiling.
+    static func windowHeight(
+        chrome: CGFloat, result: CGFloat, buffer: CGFloat, floor: CGFloat, ceiling: CGFloat
+    ) -> CGFloat {
+        min(max(chrome + result + buffer, floor), ceiling)
+    }
+
+    /// Input editor height: grows with typed content, clamped to `[min, max]`
+    /// (past `max` the editor scrolls internally instead of growing).
+    static func editorHeight(content: CGFloat, min minH: CGFloat, max maxH: CGFloat) -> CGFloat {
+        Swift.min(Swift.max(content, minH), maxH)
+    }
+
+    /// Per-card body ceiling: the result-area budget minus each card's
+    /// header/footer overhead, split evenly across the cards, floored so a card
+    /// never collapses. When above the floor, `count * (body + cardChrome)`
+    /// exactly equals `budget`.
+    static func perCardBodyMax(
+        count: Int, budget: CGFloat, cardChrome: CGFloat, floor: CGFloat
+    ) -> CGFloat {
+        let n = CGFloat(Swift.max(count, 1))
+        return Swift.max(floor, (budget - n * cardChrome) / n)
+    }
+
+    // Result body text metrics, mirroring `StreamingTextView` (system font 14,
+    // line spacing 3, 8pt vertical text-container inset each side).
+    static let bodyLineSpacing: CGFloat = 3
+    static let bodyVInset: CGFloat = 8
+    static let bodyLineHeight = NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: 14))
+
+    /// Largest line-aligned body height ≤ `ceiling`: fits `k` whole lines plus
+    /// the top/bottom insets, so a capped body scrolls from a clean line
+    /// boundary instead of slicing the last line in half.
+    static func lineAlignedBodyHeight(atMost ceiling: CGFloat) -> CGFloat {
+        let step = bodyLineHeight + bodyLineSpacing
+        let usable = ceiling - bodyVInset * 2
+        let k = ((usable + bodyLineSpacing) / step).rounded(.down)
+        guard k >= 1 else { return ceiling }
+        return bodyVInset * 2 + k * bodyLineHeight + (k - 1) * bodyLineSpacing
+    }
+
+    /// Resolved result-body height: at least `min`, growing with the measured
+    /// text height, but never past the line-aligned `cap`. Content that fits
+    /// shows at its exact height; only overflow is clamped (to a whole-line cap).
+    static func resolvedBodyHeight(text: CGFloat, min minH: CGFloat, cap: CGFloat) -> CGFloat {
+        Swift.min(Swift.max(text, minH), lineAlignedBodyHeight(atMost: cap))
     }
 }

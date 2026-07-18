@@ -45,7 +45,7 @@ struct PanelRootView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .frame(minWidth: 380, minHeight: 220)
+        .frame(minWidth: 304, minHeight: 220)
         .background(AppleTranslationHostView())
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
         // Notice floats as a toast so showing/hiding it never changes the

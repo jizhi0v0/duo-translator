@@ -25,6 +25,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         KeychainStore.shared.preferSynchronizable = CloudSync.hasKeychainGroupsEntitlement
         CloudSync.shared.start(settings: .shared)
+
+        installDebugHooks()
+
+        // UI tests launch with `-uiTest` and seed the panel deterministically via
+        // the `UITEST_INPUT` environment variable (no hotkeys / typing needed).
+        if ProcessInfo.processInfo.arguments.contains("-uiTest") {
+            let env = ProcessInfo.processInfo.environment
+            let seed = env["UITEST_INPUT"] ?? ""
+            let resultCount = Int(env["UITEST_RESULTS"] ?? "") ?? 0
+            coordinator.uiTestShowPanel(seed: seed, resultCount: resultCount)
+        }
+    }
+
+    /// Local-only diagnostics, driven via `notifyutil`-style distributed
+    /// notifications so paste/focus issues can be debugged over SSH.
+    private func installDebugHooks() {
+        let center = DistributedNotificationCenter.default()
+        center.addObserver(
+            forName: Notification.Name("dev.bobby.duo.debug.openSettings"),
+            object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor [weak self] in
+                self?.coordinator.openSettings()
+            }
+        }
+        center.addObserver(
+            forName: Notification.Name("dev.bobby.duo.debug.dumpState"),
+            object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in
+                let keyWindow = NSApp.keyWindow
+                let responder = keyWindow?.firstResponder
+                Log.app.error("""
+                debugState active=\(NSApp.isActive) \
+                keyWindow=\(keyWindow?.title ?? "nil", privacy: .public) \
+                firstResponder=\(responder.map { String(describing: type(of: $0)) } ?? "nil", privacy: .public)
+                """)
+            }
+        }
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
@@ -45,7 +84,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default: action = nil
         }
         guard let action else { return false }
-        return NSApp.sendAction(action, to: nil, from: nil)
+
+        let responder = NSApp.keyWindow?.firstResponder
+        let handled = NSApp.sendAction(action, to: nil, from: nil)
+        Log.app.error("""
+        editKey \(key, privacy: .public) action=\(action.description, privacy: .public) \
+        handled=\(handled) keyWindow=\(NSApp.keyWindow?.title ?? "nil", privacy: .public) \
+        firstResponder=\(responder.map { String(describing: type(of: $0)) } ?? "nil", privacy: .public)
+        """)
+        if handled { return true }
+
+        // macOS 26: SwiftUI text fields hosted in a plain NSHostingView don't
+        // resolve `paste:` through the responder chain. Insert the pasteboard
+        // text straight into the focused text-input client instead.
+        if action == #selector(NSText.paste(_:)),
+           let client = responder as? NSTextInputClient,
+           let text = NSPasteboard.general.string(forType: .string) {
+            client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+            Log.app.info("editKey paste via NSTextInputClient fallback")
+            return true
+        }
+        return false
     }
 
     private static func buildMainMenu() -> NSMenu {

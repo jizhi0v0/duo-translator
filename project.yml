@@ -33,6 +33,7 @@ targets:
     scheme:
       testTargets:
         - DuoTranslatorTests
+        - DuoTranslatorUITests
 
   DuoTranslatorTests:
     type: bundle.unit-test
@@ -43,5 +44,18 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: dev.bobby.DuoTranslatorTests
+    dependencies:
+      - target: DuoTranslator
+
+  DuoTranslatorUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - UITests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.bobby.DuoTranslatorUITests
+        TEST_TARGET_NAME: DuoTranslator
     dependencies:
       - target: DuoTranslator
