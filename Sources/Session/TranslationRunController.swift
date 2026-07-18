@@ -8,6 +8,11 @@ final class EngineRunModel: ObservableObject, Identifiable {
         case streaming
         case done(seconds: Double)
         case failed(message: String)
+
+        var isDone: Bool {
+            if case .done = self { return true }
+            return false
+        }
     }
 
     let id: String
@@ -36,11 +41,14 @@ final class EngineRunModel: ObservableObject, Identifiable {
 @MainActor
 final class TranslationRunController: ObservableObject {
     @Published private(set) var runs: [EngineRunModel] = []
-    @Published var selectedRunID: String?
     @Published private(set) var detectedLanguage: String?
     @Published private(set) var targetLanguage: String?
+    /// Bumped once per `start()`. The panel resets its height on this, not on
+    /// `$runs`, so a single-engine `retry` doesn't snap the window back.
+    @Published private(set) var runGeneration = 0
 
-    private var tasks: [Task<Void, Never>] = []
+    private var tasks: [String: Task<Void, Never>] = [:]
+    private var lastRequest: TranslationRequest?
 
     /// `sourceOverride` / `targetOverride` come from the panel's language menus
     /// (a manual re-translate); when nil the languages are auto-detected.
@@ -66,64 +74,89 @@ final class TranslationRunController: ObservableObject {
         targetLanguage = target
 
         let request = TranslationRequest(text: trimmed, sourceLanguage: detected, targetLanguage: target)
+        lastRequest = request
         let profiles = settings.enabledProfiles
         let engines = EngineFactory.makeEngines(settings: settings, keychain: keychain)
+
+        runGeneration += 1
 
         guard !engines.isEmpty else {
             let run = EngineRunModel(id: "none", name: "未配置引擎", kind: .openAICompat)
             run.state = .failed(message: "请在设置中启用并配置至少一个翻译引擎。")
             runs = [run]
-            selectedRunID = run.id
             return
         }
 
         runs = zip(profiles, engines).map { EngineRunModel(id: $1.id, name: $1.displayName, kind: $0.kind) }
-        if selectedRunID == nil || !runs.contains(where: { $0.id == selectedRunID }) {
-            selectedRunID = runs.first?.id
+        for (engine, run) in zip(engines, runs) {
+            launch(engine: engine, run: run, request: request)
+        }
+    }
+
+    /// Cancel and restart a single engine without touching the others. The run
+    /// model is replaced in place (same id) so the card row stays stable while
+    /// the streaming views rebind to fresh stream models.
+    func retry(runID: String) {
+        guard let request = lastRequest,
+              let index = runs.firstIndex(where: { $0.id == runID }) else { return }
+        let old = runs[index]
+        tasks[runID]?.cancel()
+        tasks[runID] = nil
+        if old.kind == .apple {
+            // The Apple bridge's continuation doesn't observe task cancellation.
+            AppleTranslationBridge.shared.cancelPending()
         }
 
-        let inputChars = trimmed.count
-        tasks = zip(engines, runs).map { engine, run in
-            Task { [weak run] in
-                let started = Date()
-                do {
-                    for try await event in engine.translate(request) {
-                        guard let run else { return }
-                        switch event {
-                        case .delta(let chunk):
-                            run.stream.append(chunk)
-                        case .reasoning(let chunk):
-                            run.hasThinking = true
-                            run.thinkingStream.append(chunk)
-                        case .replace(let text):
-                            run.stream.replaceAll(text)
-                        case .usage(let prompt, let completion, let total):
-                            run.usage = (prompt, completion, total)
-                        case .done:
-                            break
-                        }
-                    }
+        guard let profile = SettingsStore.shared.enabledProfiles.first(where: { $0.id.uuidString == runID }) else { return }
+        let engine = EngineFactory.makeEngine(profile: profile, keychain: .shared)
+        let fresh = EngineRunModel(id: old.id, name: old.name, kind: old.kind)
+        runs[index] = fresh
+        launch(engine: engine, run: fresh, request: request)
+    }
+
+    private func launch(engine: any TranslationEngine, run: EngineRunModel, request: TranslationRequest) {
+        let detected = request.sourceLanguage
+        let target = request.targetLanguage
+        let inputChars = request.text.count
+        tasks[run.id] = Task { [weak run] in
+            let started = Date()
+            do {
+                for try await event in engine.translate(request) {
                     guard let run else { return }
-                    run.stream.finish()
-                    run.thinkingStream.finish()
-                    let seconds = Date().timeIntervalSince(started)
-                    run.state = .done(seconds: seconds)
-                    Self.record(run, source: detected, target: target,
-                                inputChars: inputChars, duration: seconds, status: .success)
-                } catch is CancellationError {
-                    Log.engine.debug("run cancelled, connection torn down")
-                    if let run {
-                        Self.record(run, source: detected, target: target, inputChars: inputChars,
-                                    duration: Date().timeIntervalSince(started), status: .cancelled)
+                    switch event {
+                    case .delta(let chunk):
+                        run.stream.append(chunk)
+                    case .reasoning(let chunk):
+                        run.hasThinking = true
+                        run.thinkingStream.append(chunk)
+                    case .replace(let text):
+                        run.stream.replaceAll(text)
+                    case .usage(let prompt, let completion, let total):
+                        run.usage = (prompt, completion, total)
+                    case .done:
+                        break
                     }
-                } catch {
-                    guard let run else { return }
-                    run.stream.finish()
-                    run.thinkingStream.finish()
-                    run.state = .failed(message: error.localizedDescription)
-                    Self.record(run, source: detected, target: target, inputChars: inputChars,
-                                duration: Date().timeIntervalSince(started), status: .failed)
                 }
+                guard let run else { return }
+                run.stream.finish()
+                run.thinkingStream.finish()
+                let seconds = Date().timeIntervalSince(started)
+                run.state = .done(seconds: seconds)
+                Self.record(run, source: detected, target: target,
+                            inputChars: inputChars, duration: seconds, status: .success)
+            } catch is CancellationError {
+                Log.engine.debug("run cancelled, connection torn down")
+                if let run {
+                    Self.record(run, source: detected, target: target, inputChars: inputChars,
+                                duration: Date().timeIntervalSince(started), status: .cancelled)
+                }
+            } catch {
+                guard let run else { return }
+                run.stream.finish()
+                run.thinkingStream.finish()
+                run.state = .failed(message: error.localizedDescription)
+                Self.record(run, source: detected, target: target, inputChars: inputChars,
+                            duration: Date().timeIntervalSince(started), status: .failed)
             }
         }
     }
@@ -154,8 +187,8 @@ final class TranslationRunController: ObservableObject {
     }
 
     func cancelAll() {
-        tasks.forEach { $0.cancel() }
-        tasks = []
+        tasks.values.forEach { $0.cancel() }
+        tasks = [:]
         // The Apple bridge's continuation doesn't observe task cancellation.
         AppleTranslationBridge.shared.cancelPending()
     }

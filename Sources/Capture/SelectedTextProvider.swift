@@ -27,7 +27,7 @@ enum SelectedTextProvider {
             throw CaptureError.accessibilityDenied
         }
 
-        if let text = AXSelectionReader.selectedText(), !text.isEmpty {
+        if let text = cleaned(AXSelectionReader.selectedText()) {
             return text
         }
 
@@ -35,7 +35,7 @@ enum SelectedTextProvider {
         if let app = NSWorkspace.shared.frontmostApplication {
             AXSelectionReader.pokeManualAccessibility(pid: app.processIdentifier)
             try? await Task.sleep(for: .milliseconds(120))
-            if let text = AXSelectionReader.selectedText(), !text.isEmpty {
+            if let text = cleaned(AXSelectionReader.selectedText()) {
                 return text
             }
         }
@@ -44,10 +44,18 @@ enum SelectedTextProvider {
             throw CaptureError.secureInput
         }
 
-        if let text = await PasteboardCopyFallback.capture(),
-           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if let text = cleaned(await PasteboardCopyFallback.capture()) {
             return text
         }
         throw CaptureError.empty
+    }
+
+    /// Strip any U+FFFD the capture paths couldn't repair, and treat
+    /// whitespace-only results as no capture at all.
+    private static func cleaned(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let sanitized = CapturedTextSanitizer.sanitized(text)
+        guard !sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return sanitized
     }
 }

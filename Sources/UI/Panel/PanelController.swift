@@ -32,8 +32,8 @@ final class PanelController: NSObject, NSWindowDelegate {
     private var clickMonitor: Any?
     private var runsObserver: AnyCancellable?
 
-    /// Height of everything that isn't the streaming result text.
-    private static let chromeHeight: CGFloat = 220
+    /// Height of everything above the result list (toolbar, input, language bar).
+    private static let chromeHeight: CGFloat = 240
     private static let defaultSize = NSSize(width: 500, height: 360)
     /// Hard ceiling for content-driven growth. Beyond this the result area
     /// scrolls instead of the window getting taller (also clamped to the screen).
@@ -59,6 +59,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
+        // Liquid Glass: the SwiftUI root draws the panel body as glass, so the
+        // window itself must be transparent.
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.minSize = NSSize(width: 380, height: 280)
         panel.delegate = self
         panel.onEscape = { [weak self] in self?.close() }
@@ -73,10 +77,13 @@ final class PanelController: NSObject, NSWindowDelegate {
         )
         panel.contentView = DraggableHostingView(rootView: root)
 
-        // Each translation replaces the runs array; reset to the default height
-        // then let growForContent expand for the new content, so a short result
-        // after a long one snaps back cleanly instead of shrinking gradually.
-        runsObserver = viewModel.run.$runs
+        // Each translation bumps runGeneration exactly once; reset to the
+        // default height then let growForContent expand for the new content,
+        // so a short result after a long one snaps back cleanly. Observing
+        // runGeneration (not $runs) keeps a single-card retry from snapping
+        // the window back mid-session.
+        runsObserver = viewModel.run.$runGeneration
+            .dropFirst()
             .sink { [weak self] _ in self?.resetToDefaultHeight() }
     }
 
@@ -124,9 +131,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.setFrame(NSRect(origin: origin, size: size), display: false)
     }
 
-    /// Grow the panel to fit the streamed text, but never past `maxHeight` (also
-    /// clamped to the screen). Grow-only: shrinking is handled once per run by
-    /// `resetToDefaultHeight`, so the window doesn't creep down while streaming.
+    /// Grow the panel to fit the stacked result cards, but never past
+    /// `maxHeight` (also clamped to the screen). Grow-only: shrinking is
+    /// handled once per run by `resetToDefaultHeight`, so the window doesn't
+    /// creep down while streaming.
     private func growForContent(textHeight: CGFloat) {
         guard panel.isVisible, !panel.inLiveResize else { return }
         guard let screen = panel.screen ?? NSScreen.main else { return }

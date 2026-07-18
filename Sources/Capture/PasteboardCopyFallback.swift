@@ -12,13 +12,23 @@ enum PasteboardCopyFallback {
 
         postCmdC()
 
+        // The source app may still be writing when changeCount first bumps
+        // (clearContents lands before the data does), so a first read can see
+        // nil or partially-decoded text with U+FFFD in it — keep re-reading
+        // briefly instead of trusting it.
         var copied: String?
-        for _ in 0..<30 {
+        var readsAfterChange = 0
+        for _ in 0..<40 {
             try? await Task.sleep(for: .milliseconds(10))
-            if pasteboard.changeCount != previousChangeCount {
-                copied = pasteboard.string(forType: .string)
+            guard pasteboard.changeCount != previousChangeCount else { continue }
+            let text = pasteboard.string(forType: .string)
+            if let text, !text.isEmpty, !CapturedTextSanitizer.containsReplacementCharacter(text) {
+                copied = text
                 break
             }
+            copied = text ?? copied
+            readsAfterChange += 1
+            if readsAfterChange >= 8 { break }
         }
 
         if pasteboard.changeCount != previousChangeCount {

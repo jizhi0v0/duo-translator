@@ -1,10 +1,15 @@
 import AppKit
 import Combine
+import SwiftUI
 
 @MainActor
 final class PanelViewModel: ObservableObject {
     @Published var inputText = ""
     @Published var isPinned = false
+    /// Cards the user collapsed, keyed by engine profile UUID. Session-scoped
+    /// and kept across runs (run models are rebuilt every run, so this state
+    /// can't live on them).
+    @Published var collapsedEngineIDs: Set<String> = []
     /// Bumped to re-focus the input editor when the panel is shown.
     @Published var focusToken = 0
     /// Transient error / hint shown under the header.
@@ -57,10 +62,25 @@ final class PanelViewModel: ObservableObject {
         return out
     }
 
-    func copySelectedResult() {
-        guard let selected = run.runs.first(where: { $0.id == run.selectedRunID }) ?? run.runs.first else { return }
-        let text = selected.stream.fullText
-        guard !text.isEmpty else { return }
+    func collapsedBinding(for engineID: String) -> Binding<Bool> {
+        Binding(
+            get: { [weak self] in self?.collapsedEngineIDs.contains(engineID) ?? false },
+            set: { [weak self] collapsed in
+                if collapsed {
+                    self?.collapsedEngineIDs.insert(engineID)
+                } else {
+                    self?.collapsedEngineIDs.remove(engineID)
+                }
+            }
+        )
+    }
+
+    /// Copy the first finished result (falling back to the first non-empty
+    /// stream while everything is still running).
+    func copyFirstResult() {
+        let candidate = run.runs.first { $0.state.isDone && !$0.stream.fullText.isEmpty }
+            ?? run.runs.first { !$0.stream.fullText.isEmpty }
+        guard let text = candidate?.stream.fullText, !text.isEmpty else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)

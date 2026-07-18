@@ -5,7 +5,7 @@
 // Screen Recording) grants reset on every build.
 // Identity pinned by SHA-1 hash because two revoked certificates with a similar
 // name exist in the keychain ("Apple Development: 1123157557@qq.com").
-CODE_SIGN_IDENTITY = F81CE822EAF587A11E7A705AD4940AE767E39E72
+CODE_SIGN_IDENTITY = 8D6A8187806EF56D4F4A79FA6E233776B3A5AD0C
 ENABLE_HARDENED_RUNTIME = NO
 // M5: set this to the name of the Development provisioning profile (with
 // iCloud capability) once it exists, e.g.:
