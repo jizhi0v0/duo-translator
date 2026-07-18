@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import SwiftUI
 
 final class TranslatorPanel: NSPanel {
@@ -30,14 +29,31 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     private var panel: TranslatorPanel!
     private var clickMonitor: Any?
-    private var runsObserver: AnyCancellable?
 
-    /// Height of everything above the result list (toolbar, input, language bar).
+    /// Latest measured heights that drive the window fit: the chrome (everything
+    /// above the result list) and the result content. Kept so either changing
+    /// re-fits against the current value of the other.
+    private var chromeHeightMeasured: CGFloat = chromeHeight
+    private var resultHeightMeasured: CGFloat = 0
+
+    /// Initial estimate for the chrome above the result list; replaced by a
+    /// live measurement once the view lays out.
     private static let chromeHeight: CGFloat = 240
     private static let defaultSize = NSSize(width: 500, height: 360)
-    /// Hard ceiling for content-driven growth. Beyond this the result area
-    /// scrolls instead of the window getting taller (also clamped to the screen).
-    private static let maxHeight: CGFloat = 640
+    /// Floor for content-driven fit. Kept low so the empty / no-result state
+    /// pulls in tight instead of leaving a blank block under the placeholder.
+    private static let minFittedHeight: CGFloat = 220
+    /// Hard ceiling for content-driven growth. Beyond this the result body
+    /// scrolls instead of the window getting taller (also clamped to the
+    /// screen). Sized so a single card can grow to its full body height
+    /// (`ResultCardView.maxBodyHeight`) with the header/footer still visible.
+    private static let maxHeight: CGFloat = 760
+    /// Margin kept above and below the panel when it fills a tall screen.
+    private static let screenPadding: CGFloat = 24
+    /// Slack added to the fitted height: covers a slightly-short content
+    /// measurement (so the bottom card's footer never clips) and leaves a little
+    /// breathing room below the last card.
+    private static let fitBuffer: CGFloat = 36
 
     override init() {
         super.init()
@@ -51,6 +67,11 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
+        // Hide all native traffic-light buttons: on this transparent glass panel
+        // the red close dot floated detached in the top-left corner. The panel
+        // draws its own toolbar (pin / close) instead, and Esc still closes via
+        // `cancelOperation` → `onEscape`.
+        panel.standardWindowButton(.closeButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.isFloatingPanel = true
@@ -70,21 +91,19 @@ final class PanelController: NSObject, NSWindowDelegate {
         let root = PanelRootView(
             viewModel: viewModel,
             run: viewModel.run,
-            onContentHeightChange: { [weak self] textHeight in
-                self?.growForContent(textHeight: textHeight)
+            onContentHeightChange: { [weak self] contentHeight in
+                guard let self else { return }
+                self.resultHeightMeasured = contentHeight
+                self.refit()
+            },
+            onChromeHeightChange: { [weak self] chromeHeight in
+                guard let self else { return }
+                self.chromeHeightMeasured = chromeHeight
+                self.refit()
             },
             onClose: { [weak self] in self?.close() }
         )
         panel.contentView = DraggableHostingView(rootView: root)
-
-        // Each translation bumps runGeneration exactly once; reset to the
-        // default height then let growForContent expand for the new content,
-        // so a short result after a long one snaps back cleanly. Observing
-        // runGeneration (not $runs) keeps a single-card retry from snapping
-        // the window back mid-session.
-        runsObserver = viewModel.run.$runGeneration
-            .dropFirst()
-            .sink { [weak self] _ in self?.resetToDefaultHeight() }
     }
 
     // MARK: - Presentation
@@ -93,12 +112,25 @@ final class PanelController: NSObject, NSWindowDelegate {
         if let prefill {
             viewModel.inputText = prefill
         }
-        if !panel.isVisible {
+        // Only place-and-size from scratch for a genuinely fresh panel. The
+        // outside-click monitor orders the panel out (isVisible becomes false)
+        // between uses, but its content and fitted size are still there — re-
+        // showing must keep them, not snap back to the default size.
+        if !panel.isVisible, viewModel.run.runs.isEmpty {
             centerOnActiveScreen()
         }
+        // Don't force the height here. When a real translation starts, `refit`
+        // resizes to fit the new content; when a hotkey fires with nothing to
+        // translate (no selection), the existing results stay put instead of
+        // the window collapsing to the default height.
         panel.makeKeyAndOrderFront(nil)
         installClickMonitor()
         viewModel.focusToken += 1
+        // Fit to the current content now that the panel is on screen. Content
+        // measurements that arrived while it was ordered out (e.g. the empty
+        // placeholder after clearing) were ignored by `refit`'s visibility
+        // guard, so the window could otherwise stay at the wrong height.
+        refit()
         if autoTranslate {
             viewModel.translate()
         }
@@ -110,62 +142,65 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.orderOut(nil)
     }
 
-    /// Show the panel with a transient notice (capture failures, hints).
+    /// Show the panel with a transient notice (capture failures, hints). Clears
+    /// the previous input and results so a failed trigger (e.g. no selection)
+    /// shows a clean panel with just the notice — no stale input with an empty
+    /// result area under it.
     func showNotice(_ message: String) {
+        viewModel.inputText = ""
+        viewModel.run.clear()
         showInput()
         viewModel.notice = message
     }
 
-    /// Center the panel on whichever screen the pointer is on (falls back to the
-    /// main screen). Growth from `growForContent` expands downward from here.
+    /// Place the panel on whichever screen the pointer is on (falls back to the
+    /// main screen), horizontally centered with its top edge in the upper
+    /// portion of the screen. The window is top-anchored, so results stream in
+    /// by growing downward into the space below from here.
     private func centerOnActiveScreen() {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
         guard let visible = screen?.visibleFrame else { return }
 
         let size = Self.defaultSize
+        let topY = visible.maxY - visible.height * 0.16 // top edge ~16% down
         let origin = NSPoint(
             x: visible.midX - size.width / 2,
-            y: visible.midY - size.height / 2
+            y: topY - size.height
         )
         panel.setFrame(NSRect(origin: origin, size: size), display: false)
     }
 
-    /// Grow the panel to fit the stacked result cards, but never past
-    /// `maxHeight` (also clamped to the screen). Grow-only: shrinking is
-    /// handled once per run by `resetToDefaultHeight`, so the window doesn't
-    /// creep down while streaming.
-    private func growForContent(textHeight: CGFloat) {
+    /// Size the panel to fit `chrome + result` content, grow and shrink, with
+    /// the **top edge pinned**. Results stream in by extending the bottom edge
+    /// downward while the input stays put; collapsing/expanding a card likewise
+    /// only moves the bottom, so the header stays under the pointer. This avoids
+    /// the window jumping around (a centered fit repositions on every change).
+    /// Past the ceiling the result body scrolls internally instead of growing.
+    private func refit() {
         guard panel.isVisible, !panel.inLiveResize else { return }
         guard let screen = panel.screen ?? NSScreen.main else { return }
 
-        let ceiling = min(Self.maxHeight, screen.visibleFrame.height * 0.9)
-        let desired = min(max(Self.chromeHeight + textHeight, Self.defaultSize.height), ceiling)
-        var frame = panel.frame
-        let delta = desired - frame.height
-        guard delta > 4 else { return }
-        frame.origin.y -= delta
-        frame.size.height = desired
-
-        // Keep the panel on screen when growing downward.
         let visible = screen.visibleFrame
-        if frame.minY < visible.minY {
-            frame.origin.y = visible.minY
-        }
-        panel.setFrame(frame, display: true, animate: false)
-    }
+        let ceiling = min(Self.maxHeight, visible.height - Self.screenPadding * 2)
+        // Safety margin: the SwiftUI result-height measurement can land a hair
+        // short of the real rendered height (last card's footer), which clipped
+        // the bottom card. A small buffer guarantees the last card shows in full.
+        let content = chromeHeightMeasured + resultHeightMeasured + Self.fitBuffer
+        let desired = min(max(content, Self.minFittedHeight), ceiling)
+        guard abs(desired - panel.frame.height) > 4 else { return } // ignore jitter
 
-    /// Snap back to the default height with the top edge fixed. Called when a
-    /// new translation run begins so content sizes fresh each time.
-    private func resetToDefaultHeight() {
-        guard panel.isVisible else { return }
         var frame = panel.frame
-        let delta = Self.defaultSize.height - frame.height
-        guard abs(delta) > 1 else { return }
-        frame.origin.y -= delta // keep the top edge in place
-        frame.size.height = Self.defaultSize.height
-        if let visible = (panel.screen ?? NSScreen.main)?.visibleFrame, frame.maxY > visible.maxY {
-            frame.origin.y = visible.maxY - frame.height
+        let topY = frame.maxY // preserve the top edge
+        frame.size.height = desired
+        frame.origin.y = topY - desired
+
+        // Keep the panel fully on screen; if growing past the bottom, slide up.
+        if frame.minY < visible.minY + Self.screenPadding {
+            frame.origin.y = visible.minY + Self.screenPadding
+        }
+        if frame.maxY > visible.maxY - Self.screenPadding {
+            frame.origin.y = visible.maxY - Self.screenPadding - desired
         }
         panel.setFrame(frame, display: true, animate: false)
     }

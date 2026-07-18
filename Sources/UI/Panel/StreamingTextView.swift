@@ -1,6 +1,29 @@
 import AppKit
 import SwiftUI
 
+/// Scroll view for a result body. Only overrides `scrollWheel` to keep scrolling
+/// self-contained (no chaining to the outer list); it deliberately does NOT
+/// touch `mouseDownCanMoveWindow` or replace the clip view — doing so broke text
+/// selection inside the result.
+private final class ResultScrollView: NSScrollView {
+    /// Don't chain to the outer result list when there's nothing to scroll here,
+    /// or when already at the top/bottom edge.
+    override func scrollWheel(with event: NSEvent) {
+        let contentHeight = documentView?.frame.height ?? 0
+        let visibleHeight = contentView.bounds.height
+        if contentHeight <= visibleHeight + 1 {
+            return // nothing to scroll — swallow instead of lifting the outer list
+        }
+        let y = contentView.bounds.origin.y
+        let maxY = contentHeight - visibleHeight
+        let dy = event.scrollingDeltaY
+        if (dy > 0 && y <= 0) || (dy < 0 && y >= maxY) {
+            return // at the edge in this direction — don't chain
+        }
+        super.scrollWheel(with: event)
+    }
+}
+
 /// TextKit 2 backed streaming result view.
 ///
 /// Performance rules (do not break):
@@ -42,7 +65,7 @@ struct StreamingTextView: NSViewRepresentable {
         ]
         textView.typingAttributes = attributes
 
-        let scrollView = NSScrollView()
+        let scrollView = ResultScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
         scrollView.documentView = textView
@@ -70,12 +93,11 @@ struct StreamingTextView: NSViewRepresentable {
         private weak var scrollView: NSScrollView?
         private weak var textView: NSTextView?
         private var attributes: [NSAttributedString.Key: Any] = [:]
-        private var isFollowing = true
         var onContentHeightChange: ((CGFloat) -> Void)?
         private var lastReportedHeight: CGFloat = 0
         private weak var model: StreamingTextModel?
 
-        /// One-time wiring of the views and scroll observer.
+        /// One-time wiring of the views and the width observer.
         func setup(
             scrollView: NSScrollView,
             textView: NSTextView,
@@ -87,12 +109,22 @@ struct StreamingTextView: NSViewRepresentable {
             self.attributes = attributes
             self.onContentHeightChange = onContentHeightChange
 
+            // Re-measure when the view's width changes. Text height depends on
+            // the wrap width, and SwiftUI sizes the NSView to its real width
+            // *after* makeNSView/bindModel run — so the first measurement can
+            // happen at width ~0 (everything wraps, height explodes). Reporting
+            // again on the frame change corrects it to the true height.
+            textView.postsFrameChangedNotifications = true
             NotificationCenter.default.addObserver(
                 self,
-                selector: #selector(userScrolled(_:)),
-                name: NSScrollView.didLiveScrollNotification,
-                object: scrollView
+                selector: #selector(textViewFrameChanged(_:)),
+                name: NSView.frameDidChangeNotification,
+                object: textView
             )
+        }
+
+        @objc private func textViewFrameChanged(_ notification: Notification) {
+            reportHeight()
         }
 
         /// Attach to the run's text model. Called on every SwiftUI update; each
@@ -121,9 +153,9 @@ struct StreamingTextView: NSViewRepresentable {
             storage.beginEditing()
             storage.append(NSAttributedString(string: chunk, attributes: attributes))
             storage.endEditing()
-            if isFollowing {
-                textView.scrollToEndOfDocument(nil)
-            }
+            // A translation is read top-down, so don't follow the stream to the
+            // bottom — leave the scroll position where it is (at the top for a
+            // fresh run) so the reader starts from the beginning.
             reportHeight()
         }
 
@@ -135,28 +167,34 @@ struct StreamingTextView: NSViewRepresentable {
                 with: ""
             )
             storage.endEditing()
-            isFollowing = true
+            textView.scroll(.zero) // new run starts at the top
             lastReportedHeight = 0
             reportHeight()
         }
 
-        @objc private func userScrolled(_ notification: Notification) {
-            guard let scrollView, let documentView = scrollView.documentView else { return }
-            let visibleMaxY = scrollView.contentView.bounds.maxY
-            let bottom = documentView.frame.height
-            isFollowing = visibleMaxY >= bottom - 24
-        }
-
         private func reportHeight() {
-            guard let handler = onContentHeightChange,
-                  let documentView = scrollView?.documentView else { return }
-            // TextKit 2 keeps this an estimate until layout catches up — good
-            // enough for panel growth, and free to read.
-            let height = documentView.frame.height
+            guard let handler = onContentHeightChange, let textView else { return }
+            let height = contentHeight(of: textView)
             if abs(height - lastReportedHeight) > 1 {
                 lastReportedHeight = height
                 handler(height)
             }
+        }
+
+        /// The real laid-out height of the text at the current container width.
+        ///
+        /// `documentView.frame.height` can't be used: an NSTextView inflates to
+        /// fill its enclosing clip view, so once the frame grows it never
+        /// reports back down (a latch that left tall blank gaps below short
+        /// translations). The TextKit 2 layout manager's usage bounds reflect
+        /// only the glyphs, so the height tracks the text both up and down.
+        private func contentHeight(of textView: NSTextView) -> CGFloat {
+            guard let layoutManager = textView.textLayoutManager else {
+                return textView.intrinsicContentSize.height
+            }
+            layoutManager.ensureLayout(for: layoutManager.documentRange)
+            let used = layoutManager.usageBoundsForTextContainer.height
+            return used + textView.textContainerInset.height * 2
         }
 
         deinit {

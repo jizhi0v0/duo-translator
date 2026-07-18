@@ -22,9 +22,15 @@ final class PanelViewModel: ObservableObject {
 
     let run = TranslationRunController()
 
+    /// Debounces `retranslate` so rapidly swapping / changing languages fires
+    /// one translation for the final pair, not one per click.
+    private var retranslateTask: Task<Void, Never>?
+
     /// Auto-detected translate (Enter / hotkey / OCR). Resets the language
     /// menus to whatever detection chose.
     func translate() {
+        // Empty input: do nothing (and don't clear an existing notice).
+        guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         notice = nil
         run.start(text: inputText, settings: .shared, keychain: .shared)
         selectedSource = run.detectedLanguage ?? ""
@@ -32,17 +38,25 @@ final class PanelViewModel: ObservableObject {
     }
 
     /// Re-run with the current menu selections, interrupting the in-flight run.
+    /// Debounced: a burst of language changes collapses to a single run for the
+    /// final pair, avoiding rapid-fire availability checks (which could flash a
+    /// spurious "download language" prompt for an already-installed pair).
     func retranslate() {
-        notice = nil
-        run.start(
-            text: inputText,
-            settings: .shared,
-            keychain: .shared,
-            sourceOverride: selectedSource.isEmpty ? nil : selectedSource,
-            targetOverride: selectedTarget.isEmpty ? nil : selectedTarget
-        )
-        selectedSource = run.detectedLanguage ?? selectedSource
-        selectedTarget = run.targetLanguage ?? selectedTarget
+        retranslateTask?.cancel()
+        retranslateTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, let self else { return }
+            self.notice = nil
+            self.run.start(
+                text: self.inputText,
+                settings: .shared,
+                keychain: .shared,
+                sourceOverride: self.selectedSource.isEmpty ? nil : self.selectedSource,
+                targetOverride: self.selectedTarget.isEmpty ? nil : self.selectedTarget
+            )
+            self.selectedSource = self.run.detectedLanguage ?? self.selectedSource
+            self.selectedTarget = self.run.targetLanguage ?? self.selectedTarget
+        }
     }
 
     func swapLanguages() {
@@ -73,16 +87,5 @@ final class PanelViewModel: ObservableObject {
                 }
             }
         )
-    }
-
-    /// Copy the first finished result (falling back to the first non-empty
-    /// stream while everything is still running).
-    func copyFirstResult() {
-        let candidate = run.runs.first { $0.state.isDone && !$0.stream.fullText.isEmpty }
-            ?? run.runs.first { !$0.stream.fullText.isEmpty }
-        guard let text = candidate?.stream.fullText, !text.isEmpty else { return }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
     }
 }
