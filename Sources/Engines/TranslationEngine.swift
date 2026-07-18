@@ -26,6 +26,10 @@ enum EngineError: LocalizedError {
     case http(status: Int, body: String)
     case decoding(String)
     case unsupported(String)
+    /// Apple Translation: the language pack for this pair isn't downloaded yet.
+    /// Surfaced as an in-card download prompt rather than auto-popping Apple's
+    /// download sheet on every translation.
+    case appleLanguagePackMissing(source: String?, target: String)
 
     var errorDescription: String? {
         switch self {
@@ -39,6 +43,8 @@ enum EngineError: LocalizedError {
             return "响应解析失败：\(detail)"
         case .unsupported(let detail):
             return detail
+        case .appleLanguagePackMissing:
+            return "Apple 翻译需要下载语言包"
         }
     }
 

@@ -8,6 +8,9 @@ final class EngineRunModel: ObservableObject, Identifiable {
         case streaming
         case done(seconds: Double)
         case failed(message: String)
+        /// Apple Translation: language pack not downloaded; the card offers an
+        /// explicit download button that carries this pair.
+        case needsAppleDownload(source: String?, target: String)
 
         var isDone: Bool {
             if case .done = self { return true }
@@ -22,6 +25,11 @@ final class EngineRunModel: ObservableObject, Identifiable {
     /// Reasoning/thinking output (reasoning models only).
     let thinkingStream = StreamingTextModel()
     @Published var state: RunState = .streaming
+    /// Flips true on the first body chunk. While false and still streaming, the
+    /// card shows a compact loading placeholder instead of an empty text view
+    /// sized from the previous run — so a slow engine doesn't reserve a tall
+    /// blank block above a fast one's result.
+    @Published var hasContent = false
     /// Set once the engine emits any reasoning; gates the collapsible section.
     @Published var hasThinking = false
     /// User-toggled disclosure state; thinking starts collapsed.
@@ -114,6 +122,28 @@ final class TranslationRunController: ObservableObject {
         launch(engine: engine, run: fresh, request: request)
     }
 
+    /// Explicit user action from the Apple card's "下载语言包" button: download
+    /// the pack (Apple's system sheet appears once), then re-run that engine.
+    func downloadAppleLanguagePack(runID: String, source: String?, target: String) {
+        guard let index = runs.firstIndex(where: { $0.id == runID }) else { return }
+        runs[index].state = .streaming // show progress while the sheet is up
+        Task { @MainActor in
+            do {
+                try await AppleTranslationBridge.shared.prepareDownload(source: source, target: target)
+                retry(runID: runID)
+            } catch is CancellationError {
+                setNeedsDownload(runID: runID, source: source, target: target)
+            } catch {
+                setNeedsDownload(runID: runID, source: source, target: target)
+            }
+        }
+    }
+
+    private func setNeedsDownload(runID: String, source: String?, target: String) {
+        guard let index = runs.firstIndex(where: { $0.id == runID }) else { return }
+        runs[index].state = .needsAppleDownload(source: source, target: target)
+    }
+
     private func launch(engine: any TranslationEngine, run: EngineRunModel, request: TranslationRequest) {
         let detected = request.sourceLanguage
         let target = request.targetLanguage
@@ -125,11 +155,13 @@ final class TranslationRunController: ObservableObject {
                     guard let run else { return }
                     switch event {
                     case .delta(let chunk):
+                        run.hasContent = true
                         run.stream.append(chunk)
                     case .reasoning(let chunk):
                         run.hasThinking = true
                         run.thinkingStream.append(chunk)
                     case .replace(let text):
+                        run.hasContent = true
                         run.stream.replaceAll(text)
                     case .usage(let prompt, let completion, let total):
                         run.usage = (prompt, completion, total)
@@ -149,6 +181,18 @@ final class TranslationRunController: ObservableObject {
                 if let run {
                     Self.record(run, source: detected, target: target, inputChars: inputChars,
                                 duration: Date().timeIntervalSince(started), status: .cancelled)
+                }
+            } catch let error as EngineError {
+                guard let run else { return }
+                run.stream.finish()
+                run.thinkingStream.finish()
+                if case .appleLanguagePackMissing(let source, let target) = error {
+                    // Not a failure — a pending user action. Don't log it as one.
+                    run.state = .needsAppleDownload(source: source, target: target)
+                } else {
+                    run.state = .failed(message: error.localizedDescription)
+                    Self.record(run, source: detected, target: target, inputChars: inputChars,
+                                duration: Date().timeIntervalSince(started), status: .failed)
                 }
             } catch {
                 guard let run else { return }
