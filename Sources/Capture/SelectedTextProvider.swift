@@ -28,6 +28,17 @@ enum SelectedTextProvider {
         }
 
         if let text = cleaned(AXSelectionReader.selectedText()) {
+            // Web views (Electron/Chromium) expose a multi-line selection through
+            // AX as a single flattened line. When the AX text looks like that —
+            // no line breaks but long enough to plausibly span lines — take a ⌘C
+            // instead, which keeps the breaks. `PasteboardCopyFallback` only
+            // returns on a fresh copy (the change count bumped), so it's the
+            // current selection; prefer it whenever it comes back with breaks.
+            if !text.contains("\n"), text.count > 30,
+               let copied = cleaned(await PasteboardCopyFallback.capture()),
+               copied.contains("\n") {
+                return copied
+            }
             return text
         }
 
@@ -50,12 +61,14 @@ enum SelectedTextProvider {
         throw CaptureError.empty
     }
 
-    /// Strip any U+FFFD the capture paths couldn't repair, and treat
-    /// whitespace-only results as no capture at all.
+    /// Strip any U+FFFD the capture paths couldn't repair, drop trailing
+    /// whitespace / blank lines the selection often carries (internal line
+    /// breaks are kept), and treat empty results as no capture at all.
     private static func cleaned(_ text: String?) -> String? {
         guard let text else { return nil }
         let sanitized = CapturedTextSanitizer.sanitized(text)
-        guard !sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            .replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+        guard !sanitized.isEmpty else { return nil }
         return sanitized
     }
 }
