@@ -124,7 +124,7 @@ final class PanelUITests: XCTestCase {
                       "the long completed result never fitted to page height")
         let firstPageHeight = panel(app).frame.height
         XCTAssertGreaterThan(panel(app).frame.height, 0)
-        XCTAssertLessThanOrEqual(panel(app).frame.height, 761)
+        XCTAssertLessThanOrEqual(panel(app).frame.height, 901)
 
         pageMode.click()
         XCTAssertTrue(waitUntil(timeout: 3) { abs(self.panel(app).frame.width - 400) < 8 },
@@ -151,7 +151,7 @@ final class PanelUITests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 3) { self.panel(app).frame.width > 600 },
                       "page mode never installed its wide layout")
         XCTAssertLessThan(panel(app).frame.height, 600,
-                          "an unmeasured loading page must not stretch to the 760pt ceiling")
+                          "an unmeasured loading page must not stretch to the 900pt ceiling")
     }
 
     func testPageReaderKeepsEveryParagraphAfterCompletedSwitch() {
@@ -273,7 +273,37 @@ final class PanelUITests: XCTestCase {
         }
 
         // The panel itself stays bounded by the growth ceiling.
-        XCTAssertLessThanOrEqual(panelFrame.height, 760 + 1,
+        XCTAssertLessThanOrEqual(panelFrame.height, 900 + 1,
                                  "panel exceeded its height ceiling (\(panelFrame.height))")
+    }
+
+    // MARK: - Re-translation resets a reused card's height
+
+    func testReTranslationResetsCardHeightToCompactPlaceholder() {
+        // A card is keyed by its (stable) engine id, so SwiftUI reuses the same
+        // card view across translations and its tracked body-height @State
+        // survives. The regression: after a long result, starting a new
+        // translation showed the "翻译中…" placeholder still at the previous
+        // result's tall height. The placeholder must open compact.
+        let longResult = String(
+            repeating: "重复翻译前的长译文，占满卡片并把面板撑到接近上限。", count: 40)
+        let app = launch(seed: "source text", results: 1, resultText: longResult)
+
+        // The single long result grows the card (and panel) tall.
+        XCTAssertTrue(waitUntil(timeout: 5) { self.panel(app).frame.height > 500 },
+                      "a long completed result should grow the panel tall (was \(panel(app).frame.height))")
+        let tallHeight = panel(app).frame.height
+
+        // Re-seed to the loading placeholder on the SAME card id (a re-translate).
+        let reseed = app.buttons["uitest.reseedStreaming"]
+        XCTAssertTrue(reseed.waitForExistence(timeout: 5))
+        reseed.click()
+
+        // The reused card must collapse back to the compact placeholder height,
+        // not keep the prior result's tall height.
+        XCTAssertTrue(waitUntil(timeout: 5) { self.panel(app).frame.height < tallHeight - 150 },
+                      "re-translation left the placeholder at the previous result's height (still \(panel(app).frame.height), was \(tallHeight))")
+        XCTAssertLessThan(panel(app).frame.height, 360,
+                          "the loading placeholder card should be compact (panel \(panel(app).frame.height))")
     }
 }

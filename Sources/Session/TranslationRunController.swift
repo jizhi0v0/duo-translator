@@ -270,6 +270,22 @@ final class TranslationRunController: ObservableObject {
         targetLanguage = "zh-Hans"
     }
 
+    /// UI-test seam: flip the current cards back to their no-content loading
+    /// state **in place** — same run models, their finished result text left in
+    /// the stream. This reproduces the reported bug directly: the card is in the
+    /// placeholder state while a tall body height lingers from the last result,
+    /// and the placeholder must still render compact. (Reusing the models means
+    /// the streaming view doesn't rebind/reset, so nothing external shrinks the
+    /// body — only the card's own placeholder rule can.)
+    func uiTestReseedStreaming() {
+        cancelAll()
+        runGeneration += 1
+        for run in runs {
+            run.hasContent = false
+            run.state = .streaming
+        }
+    }
+
     /// UI-test-only deterministic stream. It waits long enough for automation
     /// to enter page mode, then emits several chunks so the test can prove the
     /// AppKit reader receives deltas after the mode switch and reaches the tail.

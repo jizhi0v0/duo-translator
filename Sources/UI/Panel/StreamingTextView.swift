@@ -35,6 +35,14 @@ private final class ResultScrollView: NSScrollView {
 struct StreamingTextView: NSViewRepresentable {
     let model: StreamingTextModel
     var fontSize: CGFloat = 14
+    /// Ceiling for content-driven growth. Below it, `onContentHeightChange`
+    /// tracks the text's natural height so the card can grow with the stream;
+    /// once reached, reporting stops and the view scrolls internally instead.
+    var heightCeiling: CGFloat = .greatestFiniteMagnitude
+    /// Reports the text's natural content height (glyphs + insets), throttled,
+    /// after each append/reset. Left nil by callers (like the thinking
+    /// section) that just want a fixed min/max frame with no growth tracking.
+    var onContentHeightChange: ((CGFloat) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -74,7 +82,11 @@ struct StreamingTextView: NSViewRepresentable {
         scrollView.documentView = textView
         scrollView.contentView.postsBoundsChangedNotifications = true
 
-        context.coordinator.setup(textView: textView, attributes: attributes)
+        context.coordinator.setup(
+            textView: textView, attributes: attributes,
+            onContentHeightChange: onContentHeightChange
+        )
+        context.coordinator.heightCeiling = heightCeiling
         context.coordinator.bindModel(model)
         return scrollView
     }
@@ -82,6 +94,8 @@ struct StreamingTextView: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         // Each translation run hands the view a fresh StreamingTextModel; without
         // rebinding, only the first run would ever render.
+        context.coordinator.onContentHeightChange = onContentHeightChange
+        context.coordinator.heightCeiling = heightCeiling
         context.coordinator.bindModel(model)
     }
 
@@ -90,15 +104,45 @@ struct StreamingTextView: NSViewRepresentable {
         private weak var textView: NSTextView?
         private var attributes: [NSAttributedString.Key: Any] = [:]
         private weak var model: StreamingTextModel?
+        var onContentHeightChange: ((CGFloat) -> Void)?
+        var heightCeiling: CGFloat = .greatestFiniteMagnitude {
+            didSet {
+                guard abs(heightCeiling - oldValue) > 1 else { return }
+                reachedHeightCeiling = false
+                scheduleHeightReport(force: true)
+            }
+        }
+        private var lastReportedHeight: CGFloat = 0
+        private var reachedHeightCeiling = false
+        private var heightReportScheduled = false
+        private var forceNextHeightReport = false
 
         /// One-time wiring of the views.
         func setup(
             textView: NSTextView,
-            attributes: [NSAttributedString.Key: Any]
+            attributes: [NSAttributedString.Key: Any],
+            onContentHeightChange: ((CGFloat) -> Void)?
         ) {
             self.textView = textView
             self.attributes = attributes
+            self.onContentHeightChange = onContentHeightChange
+            // The text view is vertically resizable, so TextKit resizes it to fit
+            // its content the instant a line wraps in (streaming) or the whole
+            // document lands (one-shot). Observing that frame change — rather than
+            // only polling after an append — is what lets the card track the text
+            // in real time instead of trailing a throttle behind it.
+            textView.postsFrameChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(textViewFrameChanged),
+                name: NSView.frameDidChangeNotification, object: textView
+            )
         }
+
+        @objc private func textViewFrameChanged() {
+            scheduleHeightReport(force: false)
+        }
+
+        deinit { NotificationCenter.default.removeObserver(self) }
 
         /// Attach to the run's text model. Called on every SwiftUI update; each
         /// translation run supplies a new model, so we detach the old one, clear
@@ -140,6 +184,15 @@ struct StreamingTextView: NSViewRepresentable {
             // A translation is read top-down, so don't follow the stream to the
             // bottom — leave the scroll position where it is (at the top for a
             // fresh run) so the reader starts from the beginning.
+            //
+            // No special path for one-shot vs. streaming engines: appending grows
+            // the text view, `textViewFrameChanged` observes that, and the card
+            // fits it. A one-shot fill (Apple, or any non-streaming engine) lands
+            // its whole document in one append and expands to full height in a
+            // single step exactly like a stream's final line — same code, no
+            // engine-specific adaptation. This append-side report just covers the
+            // first layout, where the frame notification may not have fired yet.
+            scheduleHeightReport(force: false)
         }
 
         private func resetText() {
@@ -151,6 +204,59 @@ struct StreamingTextView: NSViewRepresentable {
             )
             storage.endEditing()
             textView.scroll(.zero) // new run starts at the top
+            lastReportedHeight = 0
+            reachedHeightCeiling = false
+            scheduleHeightReport(force: true)
+        }
+
+        /// Reported height is snapped up to a whole line (see
+        /// `lineCeiledBodyHeight`), so the card grows in clean line-height steps
+        /// rather than at raw (fractional) glyph heights that look stiff — and
+        /// that snapping is what coalesces resizes: measurements between two
+        /// line-crossings round to the same height and are dropped by the `> 1`
+        /// guard below, so only an actual new line ever resizes the card.
+        ///
+        /// There is no throttle: the snap + `> 1` guard already collapse a burst
+        /// of chunks into one resize per line, so the report only needs to hop to
+        /// the next runloop (coalesced by `heightReportScheduled`) to stay out of
+        /// the SwiftUI update phase. A throttle here would just leave the height a
+        /// line behind the text. Measuring stops once the body hits its ceiling
+        /// (`reachedHeightCeiling`), so the per-runloop cost stays bounded.
+        private func scheduleHeightReport(force: Bool) {
+            if reachedHeightCeiling, !force { return }
+            forceNextHeightReport = forceNextHeightReport || force
+            guard !heightReportScheduled else { return }
+            heightReportScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.heightReportScheduled = false
+                let forceReport = self.forceNextHeightReport
+                self.forceNextHeightReport = false
+                guard let handler = self.onContentHeightChange,
+                      let textView = self.textView,
+                      let lm = textView.textLayoutManager else { return }
+                // An empty document (the "翻译中…" placeholder state) must report a
+                // single line, never be measured: TextKit 2's usage bounds for an
+                // empty container with unbounded height don't collapse to one line,
+                // so measuring here would snap the placeholder card to the ceiling.
+                // An empty document (the "翻译中…" placeholder state) must report a
+                // single line, never be measured: TextKit 2's usage bounds for an
+                // empty container with unbounded height don't collapse to one line,
+                // so measuring here would snap the placeholder card to the ceiling.
+                let raw: CGFloat
+                if (textView.textStorage?.length ?? 0) == 0 {
+                    raw = textView.textContainerInset.height * 2
+                } else {
+                    lm.ensureLayout(for: lm.documentRange)
+                    raw = lm.usageBoundsForTextContainer.height
+                        + textView.textContainerInset.height * 2
+                }
+                let height = PanelLayout.lineCeiledBodyHeight(atLeast: raw)
+                self.reachedHeightCeiling = height >= self.heightCeiling - 1
+                guard forceReport || abs(height - self.lastReportedHeight) > 1 else { return }
+                self.lastReportedHeight = height
+                handler(height)
+            }
         }
     }
 }

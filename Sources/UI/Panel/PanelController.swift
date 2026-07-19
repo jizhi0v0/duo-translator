@@ -95,7 +95,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// Hard ceiling for content-driven growth (input, card count, expanded
     /// thinking, and page mode). Compact result bodies themselves use stable
     /// viewports and scroll internally instead of resizing while streaming.
-    private static let maxHeight: CGFloat = 760
+    private static let maxHeight: CGFloat = 900
     /// Margin kept above and below the panel when it fills a tall screen.
     private static let screenPadding: CGFloat = 24
     /// Floor for the result-list budget (space left for cards after chrome), so
@@ -587,5 +587,17 @@ enum PanelLayout {
     /// of moving every card below it and resizing the panel on each new line.
     static func stableBodyHeight(preferred: CGFloat, cap: CGFloat) -> CGFloat {
         lineAlignedBodyHeight(atMost: Swift.min(preferred, cap))
+    }
+
+    /// Smallest line-aligned body height ≥ `target`: rounds a raw glyph
+    /// measurement UP to the next whole-line boundary. A card whose frame
+    /// follows the stream snaps line-by-line (never a fractional height that
+    /// looks stiff), and rounding up — never down — guarantees the frame is at
+    /// least as tall as the real content, so it grows instead of clipping.
+    static func lineCeiledBodyHeight(atLeast target: CGFloat) -> CGFloat {
+        let step = bodyLineHeight + bodyLineSpacing
+        let usable = target - bodyVInset * 2
+        let k = Swift.max(1, ((usable + bodyLineSpacing) / step).rounded(.up))
+        return bodyVInset * 2 + k * bodyLineHeight + (k - 1) * bodyLineSpacing
     }
 }

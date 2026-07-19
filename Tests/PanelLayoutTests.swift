@@ -195,4 +195,46 @@ final class PanelLayoutTests: XCTestCase {
         XCTAssertEqual(h, PanelLayout.lineAlignedBodyHeight(atMost: 72))
         XCTAssertLessThanOrEqual(h, 72)
     }
+
+    // MARK: - Content-driven body growth (streaming grows in clean line steps)
+
+    func testLineCeiledHeightIsNeverBelowTarget() {
+        // Rounding UP guarantees the frame is at least as tall as the measured
+        // content, so a growing card never clips its last line.
+        for target in stride(from: CGFloat(20), through: 800, by: 1) {
+            XCTAssertGreaterThanOrEqual(
+                PanelLayout.lineCeiledBodyHeight(atLeast: target), target)
+        }
+    }
+
+    func testLineCeiledHeightFitsWholeLines() {
+        let lh = PanelLayout.bodyLineHeight
+        let sp = PanelLayout.bodyLineSpacing
+        let inset = PanelLayout.bodyVInset * 2
+        for target in stride(from: CGFloat(20), through: 800, by: 1) {
+            let h = PanelLayout.lineCeiledBodyHeight(atLeast: target)
+            let lines = (h - inset + sp) / (lh + sp)
+            XCTAssertEqual(lines, lines.rounded(), accuracy: 0.01,
+                           "height \(h) for target \(target) is not a whole number of lines")
+            XCTAssertGreaterThanOrEqual(lines.rounded(), 1)
+        }
+    }
+
+    func testLineCeiledHeightIsMonotonic() {
+        var previous: CGFloat = 0
+        for target in stride(from: CGFloat(20), through: 800, by: 1) {
+            let h = PanelLayout.lineCeiledBodyHeight(atLeast: target)
+            XCTAssertGreaterThanOrEqual(h, previous)
+            previous = h
+        }
+    }
+
+    func testLineCeiledHeightStepsByExactlyOneLine() {
+        // Two targets one whole line apart map to heights one line apart: the
+        // card grows one line at a time as the stream wraps to a new line.
+        let step = PanelLayout.bodyLineHeight + PanelLayout.bodyLineSpacing
+        let oneLine = PanelLayout.lineCeiledBodyHeight(atLeast: 40)
+        let twoLines = PanelLayout.lineCeiledBodyHeight(atLeast: 40 + step)
+        XCTAssertEqual(twoLines - oneLine, step, accuracy: 0.01)
+    }
 }
