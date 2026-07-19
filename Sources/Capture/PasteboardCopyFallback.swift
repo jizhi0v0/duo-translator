@@ -32,12 +32,16 @@ enum PasteboardCopyFallback {
         }
 
         if pasteboard.changeCount != previousChangeCount {
-            // Give the source app a beat to finish writing before restoring,
-            // then put the user's clipboard back.
-            try? await Task.sleep(for: .milliseconds(100))
-            pasteboard.clearContents()
-            if !saved.isEmpty {
-                pasteboard.writeObjects(saved)
+            // Restore the user's clipboard as a detached side effect — the caller
+            // already has the text, so blocking the return on the ~100ms
+            // settle+restore just adds latency to every capture. The clipboard
+            // holds the copied selection for that brief window, then flips back.
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(100))
+                pasteboard.clearContents()
+                if !saved.isEmpty {
+                    pasteboard.writeObjects(saved)
+                }
             }
         }
         return copied

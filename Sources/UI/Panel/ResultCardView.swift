@@ -105,6 +105,11 @@ struct ResultCardView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .frame(width: 10, alignment: .center)
+                    // Per-engine mark before the name, so the provider reads at a
+                    // glance without relying on the (user-editable) text label.
+                    EngineIcon(kind: engineRun.kind)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14, alignment: .center)
                     // Metadata, not content: kept in the secondary color so the
                     // translation body below is the only prominent (label-color)
                     // text in the card — clear primary/secondary hierarchy.

@@ -2,31 +2,61 @@ import Foundation
 import NaturalLanguage
 
 enum LanguagePolicy {
+    /// Confidence a `languageHypotheses` guess must clear before we fall back to
+    /// the recognizer's plain dominant-language pick.
+    private static let confidenceFloor = 0.55
+
     /// Detect the dominant language of `text`, returning a BCP-47 code.
-    /// A script-range check runs first because NLLanguageRecognizer is weak on
-    /// short CJK strings.
+    ///
+    /// Hybrid strategy. A script tally decides any *CJK-dominant* string of any
+    /// length: kana and hangul are language-exclusive (they never appear in
+    /// Chinese) and NLLanguageRecognizer is unreliable on CJK, so the script is
+    /// the authority here. Only when Latin letters dominate does the recognizer's
+    /// probability distribution decide, so a mostly-English string with a stray
+    /// CJK glyph resolves to English instead of being flipped to Chinese.
+    ///
+    /// Note: NLLanguageRecognizer's `languageHints` are deliberately *not* used —
+    /// they act as near-absolute priors (a hint of the user's pair flattens even
+    /// a 99%-confidence out-of-pair French signal to English), which does more
+    /// harm than the recognizer's already-strong Latin-script detection.
     static func detect(_ text: String) -> String? {
-        var hasHan = false
-        var hasKana = false
-        var hasHangul = false
+        var han = 0
+        var kana = 0
+        var hangul = 0
+        var latin = 0
         for scalar in text.unicodeScalars {
             switch scalar.value {
             case 0x3040...0x30FF:
-                hasKana = true
-            case 0x4E00...0x9FFF, 0x3400...0x4DBF:
-                hasHan = true
+                kana += 1
+            case 0x4E00...0x9FFF, 0x3400...0x4DBF, 0xF900...0xFAFF:
+                han += 1
             case 0xAC00...0xD7AF:
-                hasHangul = true
+                hangul += 1
+            case 0x0041...0x005A, 0x0061...0x007A:
+                latin += 1
             default:
                 break
             }
         }
-        if hasKana { return "ja" }
-        if hasHangul { return "ko" }
-        if hasHan { return "zh-Hans" }
+        let cjk = han + kana + hangul
 
+        // CJK-dominant text: decide by script directly.
+        if cjk > 0, cjk >= latin {
+            if kana > 0 { return "ja" }
+            if hangul > 0 { return "ko" }
+            return "zh-Hans"
+        }
+
+        // Latin-script dominant (or no CJK): let the recognizer's distribution
+        // decide, with a confidence floor before trusting the top guess.
         let recognizer = NLLanguageRecognizer()
         recognizer.processString(String(text.prefix(400)))
+
+        let best = recognizer.languageHypotheses(withMaximum: 3)
+            .max { $0.value < $1.value }
+        if let best, best.value >= confidenceFloor {
+            return best.key.rawValue
+        }
         return recognizer.dominantLanguage?.rawValue
     }
 

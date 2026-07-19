@@ -58,6 +58,9 @@ final class TranslationRunController: ObservableObject {
     private var tasks: [String: Task<Void, Never>] = [:]
     private var lastRequest: TranslationRequest?
 
+    /// Source text of the most recent run, for the bilingual reader window.
+    var lastSourceText: String? { lastRequest?.text }
+
     /// `sourceOverride` / `targetOverride` come from the panel's language menus
     /// (a manual re-translate); when nil the languages are auto-detected.
     func start(

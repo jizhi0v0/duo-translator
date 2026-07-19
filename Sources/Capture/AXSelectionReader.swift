@@ -90,8 +90,34 @@ enum AXSelectionReader {
         return stringRef as? String
     }
 
+    /// Whether the focused element sits inside a web area (Safari / Chrome /
+    /// Electron). Web views flatten a multi-line selection to a single AX line,
+    /// so only there is the ⌘C re-check (to recover the line breaks) worth its
+    /// cost — native fields already report their newlines through AX.
+    static func focusedIsWebContext() -> Bool {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef
+        ) == .success, let focusedRef, CFGetTypeID(focusedRef) == AXUIElementGetTypeID()
+        else { return false }
+        var element = focusedRef as! AXUIElement
+        // The selection's focused element is often a text node whose web area is
+        // an ancestor; walk up a few levels looking for it.
+        for _ in 0..<6 {
+            if stringAttribute(of: element, kAXRoleAttribute) == "AXWebArea" { return true }
+            var parentRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(
+                element, kAXParentAttribute as CFString, &parentRef
+            ) == .success, let parentRef, CFGetTypeID(parentRef) == AXUIElementGetTypeID()
+            else { break }
+            element = parentRef as! AXUIElement
+        }
+        return false
+    }
+
     /// Chromium (and most Electron apps) only build their accessibility tree
-    /// once this app-level attribute is set. Call, wait ~100ms, retry.
+    /// once this app-level attribute is set. Call, poll briefly, then retry.
     static func pokeManualAccessibility(pid: pid_t) {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)

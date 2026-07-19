@@ -35,6 +35,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let seed = env["UITEST_INPUT"] ?? ""
             let resultCount = Int(env["UITEST_RESULTS"] ?? "") ?? 0
             coordinator.uiTestShowPanel(seed: seed, resultCount: resultCount)
+        } else {
+            // Warm the panel off-screen once launch settles, so the first 划词
+            // skips the lazy build + first-layout stall. Deferred so it never
+            // competes with launch or hotkey registration.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak coordinator] in
+                coordinator?.prewarmPanel()
+            }
         }
     }
 

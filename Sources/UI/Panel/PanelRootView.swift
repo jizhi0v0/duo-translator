@@ -10,12 +10,20 @@ struct PanelRootView: View {
     /// language bar, divider). Reported so the window fits exactly instead of
     /// relying on a fixed estimate that leaves a gap when the input is short.
     var onChromeHeightChange: (CGFloat) -> Void
+    /// Page mode toggled. Driven from the same SwiftUI update that swaps the
+    /// result content, so the window width and the content can never disagree
+    /// (which happened when width was a separate Combine observation).
+    var onModeChange: (Bool) -> Void
     var onClose: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
-                PanelToolbarView(viewModel: viewModel, onClose: onClose)
+                PanelToolbarView(
+                    viewModel: viewModel,
+                    hasResults: !run.runs.isEmpty,
+                    onClose: onClose
+                )
                     .padding(.horizontal, 12)
                     .padding(.top, 8)
                     .padding(.bottom, 6)
@@ -33,11 +41,19 @@ struct PanelRootView: View {
                 onChromeHeightChange($0)
             }
 
-            ResultListView(
-                viewModel: viewModel,
-                run: run,
-                onResultsHeightChange: onContentHeightChange
-            )
+            if viewModel.pageMode {
+                PageModeView(
+                    viewModel: viewModel,
+                    run: run,
+                    onResultsHeightChange: onContentHeightChange
+                )
+            } else {
+                ResultListView(
+                    viewModel: viewModel,
+                    run: run,
+                    onResultsHeightChange: onContentHeightChange
+                )
+            }
 
             // Absorbs any window height beyond the content so the result area
             // keeps its intrinsic size (reliable measurement) and extra space
@@ -46,6 +62,7 @@ struct PanelRootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .frame(minWidth: 304, minHeight: 220)
+        .onChange(of: viewModel.pageMode) { _, isPage in onModeChange(isPage) }
         .background(AppleTranslationHostView())
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
         // Notice floats as a toast so showing/hiding it never changes the

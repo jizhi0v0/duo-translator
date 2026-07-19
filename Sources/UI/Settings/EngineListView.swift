@@ -44,8 +44,7 @@ struct EngineListView: View {
 
     private func row(_ profile: Binding<EngineProfile>) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: profile.wrappedValue.kind.symbolName)
-                .font(.title3)
+            EngineIcon(kind: profile.wrappedValue.kind, size: 18)
                 .foregroundStyle(profile.wrappedValue.enabled ? Color.accentColor : Color.secondary)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 1) {
@@ -96,14 +95,46 @@ struct EngineListView: View {
 }
 
 extension EngineKind {
-    /// SF Symbol used in the engine service list.
+    /// Bundled monochrome brand logo (Media.xcassets, template-rendered), or nil
+    /// to fall back to `symbolName`. Apple uses its official SF Symbol glyph, so
+    /// no asset is bundled for it.
+    var logoAssetName: String? {
+        switch self {
+        case .openAICompat: return "openai"
+        case .anthropic: return "anthropic"
+        case .deepL: return "deepl"
+        case .apple: return nil
+        }
+    }
+
+    /// SF Symbol fallback, used when no bundled logo exists (Apple) or an asset
+    /// is missing.
     var symbolName: String {
         switch self {
+        case .apple: return "apple.logo"
         case .openAICompat: return "sparkles"
         case .anthropic: return "brain"
         case .deepL: return "network"
-        case .apple: return "apple.logo"
         }
+    }
+}
+
+/// The engine's mark, tintable via `foregroundStyle` in both the result cards
+/// and the settings list: a bundled brand logo where we have one, else the SF
+/// Symbol fallback. Sizes itself to a square so the two render interchangeably.
+struct EngineIcon: View {
+    let kind: EngineKind
+    var size: CGFloat = 13
+
+    var body: some View {
+        Group {
+            if let asset = kind.logoAssetName {
+                Image(asset).renderingMode(.template).resizable().scaledToFit()
+            } else {
+                Image(systemName: kind.symbolName).resizable().scaledToFit()
+            }
+        }
+        .frame(width: size, height: size)
     }
 }
 

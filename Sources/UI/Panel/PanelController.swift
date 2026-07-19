@@ -18,6 +18,11 @@ final class TranslatorPanel: NSPanel {
 /// drag to AppKit via `isMovableByWindowBackground`.
 final class DraggableHostingView<Content: View>: NSHostingView<Content> {
     override var mouseDownCanMoveWindow: Bool { true }
+
+    /// Act on the first click even when the panel isn't key. Without this the
+    /// non-activating panel eats the first click just to become key, so a
+    /// toolbar button (e.g. page mode) needs a wasted second click to register.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 /// Owns the floating translator panel: positioning near the mouse, key-window
@@ -29,6 +34,11 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     private var panel: TranslatorPanel!
     private var clickMonitor: Any?
+    // Timing instrumentation for the show path (first show pays lazy construction
+    // + first SwiftUI/AppKit layout; later shows reuse the panel).
+    private var didFirstShow = false
+    private var showStart: Date?
+    private var awaitingLayoutLog = false
 
     /// Latest measured heights that drive the window fit: the chrome (everything
     /// above the result list) and the result content. Kept so either changing
@@ -40,6 +50,8 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// live measurement once the view lays out.
     private static let chromeHeight: CGFloat = 240
     private static let defaultSize = NSSize(width: 400, height: 360)
+    /// Wider width used in page mode so the bilingual two-column view has room.
+    private static let pageModeWidth: CGFloat = 680
     /// Floor for content-driven fit. Kept low so the empty / no-result state
     /// pulls in tight instead of leaving a blank block under the placeholder.
     private static let minFittedHeight: CGFloat = 220
@@ -62,6 +74,10 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     override init() {
         super.init()
+        let initStart = Date()
+        defer {
+            Log.app.debug("面板: init 构造 \(String(format: "%.1f", Date().timeIntervalSince(initStart) * 1000), privacy: .public)ms")
+        }
 
         panel = TranslatorPanel(
             contentRect: NSRect(origin: .zero, size: Self.defaultSize),
@@ -81,7 +97,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.isFloatingPanel = true
         panel.level = .floating
-        panel.becomesKeyOnlyIfNeeded = true
+        // Become key on any click (not only when a subview needs the keyboard):
+        // otherwise the non-activating panel spends the first click just becoming
+        // key, so toolbar buttons need a wasted second click to register.
+        panel.becomesKeyOnlyIfNeeded = false
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
@@ -104,8 +123,13 @@ final class PanelController: NSObject, NSWindowDelegate {
             onChromeHeightChange: { [weak self] chromeHeight in
                 guard let self else { return }
                 self.chromeHeightMeasured = chromeHeight
+                if self.awaitingLayoutLog, let start = self.showStart {
+                    self.awaitingLayoutLog = false
+                    Log.app.debug("面板: 首次布局到位 show 起 \(String(format: "%.1f", Date().timeIntervalSince(start) * 1000), privacy: .public)ms")
+                }
                 self.refit()
             },
+            onModeChange: { [weak self] pageMode in self?.applyModeWidth(pageMode: pageMode) },
             onClose: { [weak self] in self?.close() }
         )
         let hostingView = DraggableHostingView(rootView: root)
@@ -119,9 +143,47 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.contentView = hostingView
     }
 
+    /// Resize the panel's width for the current mode, keeping the top edge and
+    /// horizontal center fixed and staying on screen. Height is left to `refit`.
+    private func applyModeWidth(pageMode: Bool) {
+        let targetWidth = pageMode ? Self.pageModeWidth : Self.defaultSize.width
+        guard abs(panel.frame.width - targetWidth) > 1 else { return }
+
+        var frame = panel.frame
+        let centerX = frame.midX
+        frame.origin.x = centerX - targetWidth / 2
+        frame.size.width = targetWidth
+
+        if let visible = (panel.screen ?? NSScreen.main)?.visibleFrame {
+            if frame.maxX > visible.maxX - Self.screenPadding {
+                frame.origin.x = visible.maxX - Self.screenPadding - targetWidth
+            }
+            if frame.minX < visible.minX + Self.screenPadding {
+                frame.origin.x = visible.minX + Self.screenPadding
+            }
+        }
+        panel.setFrame(frame, display: true, animate: false)
+        refit()
+        // The mode swap (cards ↔ page view) and the width change both relayout
+        // asynchronously; a deferred pass fits the height once the new content
+        // has reported its geometry, so the switch settles without a second click.
+        DispatchQueue.main.async { [weak self] in self?.refit() }
+    }
+
     // MARK: - Presentation
 
     func showInput(prefill: String? = nil, autoTranslate: Bool = false) {
+        let t0 = Date()
+        let firstShow = !didFirstShow
+        didFirstShow = true
+        showStart = t0
+        awaitingLayoutLog = true
+        defer {
+            Log.app.debug("面板: showInput 同步 \(String(format: "%.1f", Date().timeIntervalSince(t0) * 1000), privacy: .public)ms, 首次=\(firstShow, privacy: .public)")
+        }
+        // Each fresh presentation starts in the compact card mode; page mode is
+        // an explicit per-session toggle, not a sticky window state.
+        viewModel.pageMode = false
         if let prefill {
             viewModel.inputText = prefill
             // Capture-to-input (取字, no auto translate) starts no run, so the
@@ -163,6 +225,17 @@ final class PanelController: NSObject, NSWindowDelegate {
         viewModel.run.cancelAll()
         removeClickMonitor()
         panel.orderOut(nil)
+    }
+
+    /// Prime the panel at launch-idle: constructing this controller already
+    /// built the NSPanel + SwiftUI tree; forcing one layout pass pays the
+    /// first-layout cost now instead of on the user's first 划词. The window is
+    /// never ordered on screen, so nothing flashes and `refit` (visibility-
+    /// guarded) is a no-op here.
+    func prewarm() {
+        let t0 = Date()
+        panel.contentView?.layoutSubtreeIfNeeded()
+        Log.app.debug("面板: prewarm 布局 \(String(format: "%.1f", Date().timeIntervalSince(t0) * 1000), privacy: .public)ms")
     }
 
     /// UI-test presentation: seed the input and optionally inject fake result

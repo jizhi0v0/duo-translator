@@ -3,9 +3,11 @@
 // Sign Debug builds with the real Apple Development certificate so the code
 // signature stays stable across rebuilds — otherwise macOS TCC (Accessibility /
 // Screen Recording) grants reset on every build.
-// Identity pinned by SHA-1 hash because two revoked certificates with a similar
-// name exist in the keychain ("Apple Development: 1123157557@qq.com").
-CODE_SIGN_IDENTITY = 8D6A8187806EF56D4F4A79FA6E233776B3A5AD0C
+// Identity pinned by SHA-1 hash because revoked certificates with similar names
+// exist in the keychain. This is "Apple Development: 1123157557@qq.com
+// (8BZY84NXNT)" — issued under team RS59HDH7Y3 (OU=RS59HDH7Y3, O=BO LI), so the
+// signed TeamIdentifier matches DEVELOPMENT_TEAM and the Release Developer ID.
+CODE_SIGN_IDENTITY = F81CE822EAF587A11E7A705AD4940AE767E39E72
 ENABLE_HARDENED_RUNTIME = NO
 // M5: set this to the name of the Development provisioning profile (with
 // iCloud capability) once it exists, e.g.:

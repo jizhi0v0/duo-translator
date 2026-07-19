@@ -16,18 +16,34 @@ final class AppleTranslationBridge: ObservableObject {
         case translate(TranslationRequest, CheckedContinuation<String, Error>)
         /// Download the language pack for the configured pair (shows Apple's
         /// download sheet), resuming when it finishes.
-        case prepare(CheckedContinuation<Void, Error>)
+        case prepare(source: String?, target: String, CheckedContinuation<Void, Error>)
     }
 
     @Published var configuration: TranslationSession.Configuration?
     private var pending: Job?
 
     private let availability = LanguageAvailability()
-    /// Pairs confirmed installed this session. Once a pair is known good we skip
-    /// the async availability check — it can transiently report "not installed"
-    /// under rapid calls (e.g. spamming the swap button), flashing a bogus
-    /// download prompt for a pack that's actually present.
-    private var installedPairs: Set<String> = []
+    /// Pairs confirmed installed. Once a pair is known good we skip the async
+    /// availability check — `LanguageAvailability.status` is conservative and
+    /// reports `.supported` (not `.installed`) for packs a real session can
+    /// already translate with, flashing a bogus download prompt for a pack
+    /// that's actually present. A pair is confirmed either by `status` or, more
+    /// authoritatively, by a session that translated/prepared successfully.
+    /// Persisted across launches so the prompt appears at most once per pair.
+    private var installedPairs: Set<String>
+    private let installedDefaultsKey = "AppleTranslation.confirmedInstalledPairs"
+
+    private init() {
+        installedPairs = Set(UserDefaults.standard.stringArray(forKey: installedDefaultsKey) ?? [])
+    }
+
+    /// Record a pair as installed and persist it. `source == nil` pairs are not
+    /// cached (an unknown source always short-circuits to "installed" anyway).
+    private func markInstalled(source: String?, target: String) {
+        guard let source else { return }
+        guard installedPairs.insert("\(source)>\(target)").inserted else { return }
+        UserDefaults.standard.set(Array(installedPairs), forKey: installedDefaultsKey)
+    }
 
     /// Whether the pack for this pair is already installed, so the caller can
     /// decide to translate directly vs. prompt for a download — without ever
@@ -42,7 +58,7 @@ final class AppleTranslationBridge: ObservableObject {
         )
         switch status {
         case .installed:
-            installedPairs.insert(key)
+            markInstalled(source: source, target: target)
             return true
         default:
             return false
@@ -60,7 +76,7 @@ final class AppleTranslationBridge: ObservableObject {
     /// explicit user action (the in-card "下载语言包" button), never automatically.
     func prepareDownload(source: String?, target: String) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            start(job: .prepare(continuation), source: source, target: target)
+            start(job: .prepare(source: source, target: target, continuation), source: source, target: target)
         }
     }
 
@@ -90,13 +106,17 @@ final class AppleTranslationBridge: ObservableObject {
         case .translate(let request, let continuation):
             do {
                 let response = try await session.translate(request.text)
+                // A successful translation is authoritative proof the pack is
+                // installed, even if `status` earlier claimed otherwise.
+                markInstalled(source: request.sourceLanguage, target: request.targetLanguage)
                 continuation.resume(returning: response.targetText)
             } catch {
                 continuation.resume(throwing: error)
             }
-        case .prepare(let continuation):
+        case .prepare(let source, let target, let continuation):
             do {
                 try await session.prepareTranslation()
+                markInstalled(source: source, target: target)
                 continuation.resume()
             } catch {
                 continuation.resume(throwing: error)
@@ -109,7 +129,7 @@ final class AppleTranslationBridge: ObservableObject {
         pending = nil
         switch job {
         case .translate(_, let continuation): continuation.resume(throwing: CancellationError())
-        case .prepare(let continuation): continuation.resume(throwing: CancellationError())
+        case .prepare(_, _, let continuation): continuation.resume(throwing: CancellationError())
         }
     }
 }

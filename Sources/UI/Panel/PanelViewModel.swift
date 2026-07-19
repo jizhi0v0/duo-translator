@@ -6,6 +6,14 @@ import SwiftUI
 final class PanelViewModel: ObservableObject {
     @Published var inputText = ""
     @Published var isPinned = false
+    /// Page mode: widen the panel and show one provider's output large, with a
+    /// provider selector on top, instead of the stacked compact cards.
+    @Published var pageMode = false
+    /// Which provider is shown in page mode (engine profile UUID). Falls back to
+    /// the first run when nil or absent.
+    @Published var pageProviderID: String?
+    /// Page mode content: true = bilingual side-by-side (原文|译文), false = 仅译文.
+    @Published var pageBilingual = true
     /// Cards the user collapsed, keyed by engine profile UUID. Session-scoped
     /// and kept across runs (run models are rebuilt every run, so this state
     /// can't live on them).

@@ -27,8 +27,16 @@ struct InputSectionView: View {
     private static let editorVChrome: CGFloat = 22
     private static let font = Font.system(size: 13)
 
+    /// Long text certainly overflows `maxEditorHeight`, so its exact height is
+    /// irrelevant — the editor caps and scrolls internally either way. Skip the
+    /// hidden full-text mirror in that case: laying out a few-thousand-char
+    /// SwiftUI `Text` with `.fixedSize` is O(n) and unvirtualized, and was the
+    /// bulk of the first-layout stall when a big selection is prefilled.
+    private var skipsMirror: Bool { viewModel.inputText.count > 1000 }
+
     private var editorHeight: CGFloat {
-        PanelLayout.editorHeight(content: contentHeight, min: Self.minEditorHeight, max: Self.maxEditorHeight)
+        if skipsMirror { return Self.maxEditorHeight }
+        return PanelLayout.editorHeight(content: contentHeight, min: Self.minEditorHeight, max: Self.maxEditorHeight)
     }
 
     var body: some View {
@@ -39,7 +47,9 @@ struct InputSectionView: View {
                 .scrollContentBackground(.hidden)
                 .padding(6)
                 .frame(height: editorHeight)
-                .background(alignment: .topLeading) { heightMirror }
+                .background(alignment: .topLeading) {
+                    if !skipsMirror { heightMirror }
+                }
                 .focused($inputFocused)
                 .onKeyPress { press in
                     guard press.key == .return, !press.modifiers.contains(.shift) else {

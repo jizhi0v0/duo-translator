@@ -14,6 +14,13 @@ final class AppCoordinator {
         panel.showInput()
     }
 
+    /// Build and lay out the panel during launch-idle so the first selection
+    /// translation doesn't pay the lazy-construction + first-layout cost. Purely
+    /// off-screen — the window is never shown, so there's no visible flash.
+    func prewarmPanel() {
+        panel.prewarm()
+    }
+
     /// UI-test entry point (guarded by the `-uiTest` launch argument in
     /// `AppDelegate`): shows the panel with deterministic seed text — and, when
     /// `resultCount > 0`, that many fake completed result cards — so tests can
@@ -29,10 +36,13 @@ final class AppCoordinator {
 
     func translateSelection() {
         Task { @MainActor in
+            let t0 = Date()
+            Log.capture.debug("划词: 触发")
             do {
                 // Capture before showing the panel so focus is still in the
                 // source app.
                 let text = try await SelectedTextProvider.capture()
+                Log.capture.debug("划词: 捕获完成→显示面板, 触发起共 \(String(format: "%.1f", Date().timeIntervalSince(t0) * 1000), privacy: .public)ms")
                 translateText(text)
             } catch SelectedTextProvider.CaptureError.accessibilityDenied {
                 PermissionCenter.requestAccessibility()

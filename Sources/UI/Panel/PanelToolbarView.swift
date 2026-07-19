@@ -9,6 +9,8 @@ import SwiftUI
 /// boxes they used to be.
 struct PanelToolbarView: View {
     @ObservedObject var viewModel: PanelViewModel
+    /// Whether there are results to show — gates the page-mode toggle.
+    var hasResults: Bool
     var onClose: () -> Void
 
     var body: some View {
@@ -21,6 +23,17 @@ struct PanelToolbarView: View {
                 viewModel.isPinned.toggle()
             }
             .accessibilityIdentifier("toolbar.pin")
+
+            if hasResults {
+                ToolbarIconButton(
+                    systemName: "rectangle.split.2x1",
+                    isActive: viewModel.pageMode,
+                    help: viewModel.pageMode ? "退出页面模式" : "页面模式（大视图 / 双语对照）"
+                ) {
+                    viewModel.pageMode.toggle()
+                }
+                .accessibilityIdentifier("toolbar.pageMode")
+            }
 
             Spacer()
 
