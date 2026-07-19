@@ -24,19 +24,6 @@ private final class ResultScrollView: NSScrollView {
     }
 }
 
-/// Scroll view + scroller for page mode, both opting out of window-dragging:
-/// the panel is `isMovableByWindowBackground`, so without this a drag on the
-/// scroller (a subview with its own setting) moves the whole window instead of
-/// scrolling. Overriding on the scroll view alone isn't enough — the scroller
-/// is what receives the drag.
-private final class NonDraggingScroller: NSScroller {
-    override var mouseDownCanMoveWindow: Bool { false }
-}
-
-private final class PageScrollView: NSScrollView {
-    override var mouseDownCanMoveWindow: Bool { false }
-}
-
 /// TextKit 2 backed streaming result view.
 ///
 /// Performance rules (do not break):
@@ -48,7 +35,6 @@ private final class PageScrollView: NSScrollView {
 struct StreamingTextView: NSViewRepresentable {
     let model: StreamingTextModel
     var fontSize: CGFloat = 14
-    var onContentHeightChange: ((CGFloat) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -88,18 +74,12 @@ struct StreamingTextView: NSViewRepresentable {
         scrollView.documentView = textView
         scrollView.contentView.postsBoundsChangedNotifications = true
 
-        context.coordinator.setup(
-            scrollView: scrollView,
-            textView: textView,
-            attributes: attributes,
-            onContentHeightChange: onContentHeightChange
-        )
+        context.coordinator.setup(textView: textView, attributes: attributes)
         context.coordinator.bindModel(model)
         return scrollView
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        context.coordinator.onContentHeightChange = onContentHeightChange
         // Each translation run hands the view a fresh StreamingTextModel; without
         // rebinding, only the first run would ever render.
         context.coordinator.bindModel(model)
@@ -107,53 +87,31 @@ struct StreamingTextView: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject {
-        private weak var scrollView: NSScrollView?
         private weak var textView: NSTextView?
         private var attributes: [NSAttributedString.Key: Any] = [:]
-        var onContentHeightChange: ((CGFloat) -> Void)?
-        private var lastReportedHeight: CGFloat = 0
         private weak var model: StreamingTextModel?
-        /// Coalesces the per-chunk height reports while streaming. Measuring the
-        /// height forces a full-document layout, so doing it on every 33ms flush
-        /// is an O(n²) storm that fights scrolling for the main thread. Batch it
-        /// to ~8/sec; resets and width changes still report immediately.
-        private var heightReportScheduled = false
 
-        /// One-time wiring of the views and the width observer.
+        /// One-time wiring of the views.
         func setup(
-            scrollView: NSScrollView,
             textView: NSTextView,
-            attributes: [NSAttributedString.Key: Any],
-            onContentHeightChange: ((CGFloat) -> Void)?
+            attributes: [NSAttributedString.Key: Any]
         ) {
-            self.scrollView = scrollView
             self.textView = textView
             self.attributes = attributes
-            self.onContentHeightChange = onContentHeightChange
-
-            // Re-measure when the view's width changes. Text height depends on
-            // the wrap width, and SwiftUI sizes the NSView to its real width
-            // *after* makeNSView/bindModel run — so the first measurement can
-            // happen at width ~0 (everything wraps, height explodes). Reporting
-            // again on the frame change corrects it to the true height.
-            textView.postsFrameChangedNotifications = true
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(textViewFrameChanged(_:)),
-                name: NSView.frameDidChangeNotification,
-                object: textView
-            )
-        }
-
-        @objc private func textViewFrameChanged(_ notification: Notification) {
-            reportHeight()
         }
 
         /// Attach to the run's text model. Called on every SwiftUI update; each
         /// translation run supplies a new model, so we detach the old one, clear
         /// the view, and replay whatever the new model already buffered.
         func bindModel(_ newModel: StreamingTextModel) {
-            guard newModel !== model else { return }
+            if newModel === model {
+                // Another mode's reader may have temporarily taken ownership of
+                // the model's single callback. Reassert it whenever this compact
+                // view becomes current again so mid-stream mode switches cannot
+                // leave the visible card frozen.
+                installCallbacks(on: newModel)
+                return
+            }
             model?.onAppend = nil
             model?.onReset = nil
             model = newModel
@@ -162,10 +120,14 @@ struct StreamingTextView: NSViewRepresentable {
             if !newModel.fullText.isEmpty {
                 append(newModel.fullText)
             }
-            newModel.onAppend = { [weak self] chunk in
+            installCallbacks(on: newModel)
+        }
+
+        private func installCallbacks(on model: StreamingTextModel) {
+            model.onAppend = { [weak self] chunk in
                 self?.append(chunk)
             }
-            newModel.onReset = { [weak self] in
+            model.onReset = { [weak self] in
                 self?.resetText()
             }
         }
@@ -178,19 +140,6 @@ struct StreamingTextView: NSViewRepresentable {
             // A translation is read top-down, so don't follow the stream to the
             // bottom — leave the scroll position where it is (at the top for a
             // fresh run) so the reader starts from the beginning.
-            scheduleHeightReport()
-        }
-
-        /// Throttled height report for the streaming append path (see
-        /// `heightReportScheduled`).
-        private func scheduleHeightReport() {
-            guard !heightReportScheduled else { return }
-            heightReportScheduled = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-                guard let self else { return }
-                self.heightReportScheduled = false
-                self.reportHeight()
-            }
         }
 
         private func resetText() {
@@ -202,55 +151,33 @@ struct StreamingTextView: NSViewRepresentable {
             )
             storage.endEditing()
             textView.scroll(.zero) // new run starts at the top
-            lastReportedHeight = 0
-            reportHeight()
-        }
-
-        private func reportHeight() {
-            guard let handler = onContentHeightChange, let textView else { return }
-            let height = contentHeight(of: textView)
-            if abs(height - lastReportedHeight) > 1 {
-                lastReportedHeight = height
-                handler(height)
-            }
-        }
-
-        /// The real laid-out height of the text at the current container width.
-        ///
-        /// `documentView.frame.height` can't be used: an NSTextView inflates to
-        /// fill its enclosing clip view, so once the frame grows it never
-        /// reports back down (a latch that left tall blank gaps below short
-        /// translations). The TextKit 2 layout manager's usage bounds reflect
-        /// only the glyphs, so the height tracks the text both up and down.
-        private func contentHeight(of textView: NSTextView) -> CGFloat {
-            guard let layoutManager = textView.textLayoutManager else {
-                return textView.intrinsicContentSize.height
-            }
-            layoutManager.ensureLayout(for: layoutManager.documentRange)
-            let used = layoutManager.usageBoundsForTextContainer.height
-            return used + textView.textContainerInset.height * 2
-        }
-
-        deinit {
-            NotificationCenter.default.removeObserver(self)
         }
     }
 }
 
-/// Static attributed-string reader for page mode, in a TextKit 2 `NSTextView`
-/// so scrolling only lays out the visible viewport (a SwiftUI `Text` re-measures
-/// the whole string via CoreText every display cycle — the scroll-jank source).
+/// Streaming reader for page mode, in a TextKit 2 `NSTextView`. It binds directly
+/// to `StreamingTextModel` and appends deltas to text storage, so page mode keeps
+/// receiving every chunk without asking SwiftUI to rebuild the whole document.
 ///
 /// Uses a plain `NSScrollView` (not `ResultScrollView`): page mode's content is
 /// the only scroller, so it needs normal scrolling, not the card list's
 /// scroll-chaining/swallow behavior. Reports content height so the page grows
 /// then scrolls, like the cards.
 struct PageReaderView: NSViewRepresentable {
-    let attributed: NSAttributedString
+    let model: StreamingTextModel
+    let original: String
+    let bilingual: Bool
+    let placeholder: String
+    /// True once the run stopped streaming. While false, 对照 interleaves only
+    /// the paragraphs translated so far (a pure append-only projection); on
+    /// settling, the original's unpaired remainder is appended once.
+    let streamSettled: Bool
     /// Identity of the underlying run. Scroll resets to the top only when this
-    /// changes (a new translation / provider) — NOT on every streaming chunk,
-    /// which would otherwise yank the reader back to the top mid-scroll.
+    /// changes (a new translation / provider), not on every streaming chunk.
     let resetKey: String
+    /// Once natural content reaches this ceiling, further appends no longer need
+    /// expensive whole-document height measurements; the reader already scrolls.
+    let heightCeiling: CGFloat
     var onContentHeightChange: ((CGFloat) -> Void)?
 
     func makeCoordinator() -> ReaderCoordinator { ReaderCoordinator() }
@@ -259,6 +186,7 @@ struct PageReaderView: NSViewRepresentable {
         let textView = NSTextView(usingTextLayoutManager: true)
         textView.isEditable = false
         textView.isSelectable = true
+        textView.setAccessibilityIdentifier("page.reader")
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 16, height: 16)
         textView.isVerticallyResizable = true
@@ -269,35 +197,57 @@ struct PageReaderView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
 
-        let scrollView = PageScrollView()
+        let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
-        scrollView.verticalScroller = NonDraggingScroller()
         scrollView.hasHorizontalScroller = false
         scrollView.drawsBackground = false
         scrollView.documentView = textView
         scrollView.contentView.postsBoundsChangedNotifications = true
 
-        context.coordinator.setup(scrollView: scrollView, textView: textView, onContentHeightChange: onContentHeightChange)
-        context.coordinator.setContent(attributed, resetKey: resetKey)
+        context.coordinator.setup(textView: textView, onContentHeightChange: onContentHeightChange)
+        context.coordinator.configure(
+            model: model,
+            original: original,
+            bilingual: bilingual,
+            placeholder: placeholder,
+            resetKey: resetKey,
+            heightCeiling: heightCeiling,
+            streamSettled: streamSettled
+        )
         return scrollView
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.onContentHeightChange = onContentHeightChange
-        context.coordinator.setContent(attributed, resetKey: resetKey)
+        context.coordinator.configure(
+            model: model,
+            original: original,
+            bilingual: bilingual,
+            placeholder: placeholder,
+            resetKey: resetKey,
+            heightCeiling: heightCeiling,
+            streamSettled: streamSettled
+        )
     }
 
     @MainActor
     final class ReaderCoordinator: NSObject {
         private weak var textView: NSTextView?
-        private weak var scrollView: NSScrollView?
         var onContentHeightChange: ((CGFloat) -> Void)?
+        private weak var model: StreamingTextModel?
+        private var original = ""
+        private var bilingual = false
+        private var placeholder = ""
+        private var resetKey: String?
+        private var heightCeiling: CGFloat = 0
+        private var streamSettled = false
         private var lastReportedHeight: CGFloat = 0
-        private var lastString = ""
-        private var lastResetKey: String?
+        private var lastWidth: CGFloat = 0
+        private var reachedHeightCeiling = false
+        private var heightReportScheduled = false
+        private var forceNextHeightReport = false
 
-        func setup(scrollView: NSScrollView, textView: NSTextView, onContentHeightChange: ((CGFloat) -> Void)?) {
-            self.scrollView = scrollView
+        func setup(textView: NSTextView, onContentHeightChange: ((CGFloat) -> Void)?) {
             self.textView = textView
             self.onContentHeightChange = onContentHeightChange
             textView.postsFrameChangedNotifications = true
@@ -307,36 +257,154 @@ struct PageReaderView: NSViewRepresentable {
             )
         }
 
-        @objc private func frameChanged() { reportHeight() }
-
-        /// Replace content only when the text actually changed — SwiftUI may call
-        /// `updateNSView` during unrelated re-renders, and re-setting the storage
-        /// then would re-lay-out for nothing. Scroll resets to the top only when
-        /// `resetKey` changes (new run/provider), so streaming a longer body
-        /// doesn't yank the reader back up while the user is reading/scrolling.
-        func setContent(_ attr: NSAttributedString, resetKey: String) {
-            guard let textView, let storage = textView.textStorage else { return }
-            guard attr.string != lastString || resetKey != lastResetKey else { return }
-            let isNewRun = resetKey != lastResetKey
-            lastResetKey = resetKey
-            lastString = attr.string
-            storage.setAttributedString(attr)
-            if isNewRun { textView.scroll(.zero) }
-            reportHeight()
+        @objc private func frameChanged() {
+            guard let width = textView?.bounds.width, abs(width - lastWidth) > 1 else { return }
+            lastWidth = width
+            reachedHeightCeiling = false
+            scheduleHeightReport(force: true)
         }
 
-        private func reportHeight() {
-            guard let handler = onContentHeightChange, let textView,
-                  let lm = textView.textLayoutManager else { return }
-            lm.ensureLayout(for: lm.documentRange)
-            let height = lm.usageBoundsForTextContainer.height + textView.textContainerInset.height * 2
-            guard abs(height - lastReportedHeight) > 1 else { return }
-            lastReportedHeight = height
-            // Deliver next tick: `reportHeight` can run inside SwiftUI's update/
-            // layout pass (from `updateNSView` or a frame-change during layout),
-            // and mutating the caller's @State synchronously there is silently
-            // dropped — which pinned the page height at its floor (very narrow).
-            DispatchQueue.main.async { handler(height) }
+        /// Rebuild only for a new model or a real presentation change. Normal
+        /// streaming bypasses SwiftUI and goes through `append`, preserving the
+        /// append-only TextKit path.
+        func configure(
+            model newModel: StreamingTextModel,
+            original newOriginal: String,
+            bilingual newBilingual: Bool,
+            placeholder newPlaceholder: String,
+            resetKey newResetKey: String,
+            heightCeiling newHeightCeiling: CGFloat,
+            streamSettled newStreamSettled: Bool
+        ) {
+            let modelChanged = model !== newModel
+            let contentConfigurationChanged = original != newOriginal || bilingual != newBilingual
+                || streamSettled != newStreamSettled
+            let visiblePlaceholderChanged = placeholder != newPlaceholder && newModel.fullText.isEmpty
+            let shouldRebuild = modelChanged || contentConfigurationChanged || visiblePlaceholderChanged
+            let shouldResetScroll = modelChanged || resetKey != newResetKey
+            let ceilingChanged = abs(heightCeiling - newHeightCeiling) > 1
+
+            if modelChanged {
+                model?.onAppend = nil
+                model?.onReset = nil
+                model = newModel
+                newModel.onAppend = { [weak self] chunk in self?.append(chunk) }
+                newModel.onReset = { [weak self] in self?.rebuildContent(resetScroll: true) }
+            }
+            original = newOriginal
+            bilingual = newBilingual
+            placeholder = newPlaceholder
+            resetKey = newResetKey
+            heightCeiling = newHeightCeiling
+            streamSettled = newStreamSettled
+
+            if ceilingChanged { reachedHeightCeiling = false }
+            if shouldRebuild {
+                rebuildContent(resetScroll: shouldResetScroll)
+            } else if ceilingChanged {
+                scheduleHeightReport(force: true)
+            }
+        }
+
+        private func rebuildContent(resetScroll: Bool) {
+            guard let textView else { return }
+            applyProjection()
+            lastReportedHeight = 0
+            reachedHeightCeiling = false
+            if resetScroll { textView.scroll(.zero) }
+            scheduleHeightReport(force: true)
+        }
+
+        private func append(_ chunk: String) {
+            guard !chunk.isEmpty else { return }
+            // The projection (placeholder / 仅译文 / interleaved 对照) is
+            // recomputed from `fullText`, which already contains this flushed
+            // chunk; extending the storage by the projection's suffix keeps the
+            // append-only TextKit path for every mode. Height fitting is
+            // throttled and stops after the scroll ceiling, while glyphs still
+            // land immediately so the visible stream is never incomplete.
+            applyProjection()
+            scheduleHeightReport(force: false)
+        }
+
+        /// The full document for the current state: placeholder before the
+        /// first chunk, raw translation in 仅译文, interleaved paragraph pairs
+        /// in 对照 (plus the original's unpaired remainder once settled).
+        private func projectedDocument() -> NSAttributedString {
+            guard let model else { return NSAttributedString() }
+            let blocks = PageModeLayout.textBlocks(
+                original: original,
+                translation: model.fullText,
+                bilingual: bilingual,
+                placeholder: placeholder,
+                settled: streamSettled
+            )
+            let output = NSMutableAttributedString()
+            for (index, block) in blocks.enumerated() {
+                // No trailing newline on the last block: the streaming tail
+                // must extend in place, and a trailing separator would have to
+                // be retracted on the next chunk (breaking the append path).
+                let text = index < blocks.count - 1 ? block.text + "\n" : block.text
+                output.append(NSAttributedString(string: text, attributes: attributes(for: block.role)))
+            }
+            return output
+        }
+
+        /// Sync the storage to the projection: append the suffix when the
+        /// current content is a prefix of the target (the streaming steady
+        /// state), otherwise replace wholesale (placeholder swap, trim edge
+        /// cases, presentation changes).
+        private func applyProjection() {
+            guard let textView, let storage = textView.textStorage else { return }
+            let target = projectedDocument()
+            let targetString = target.string as NSString
+            let currentLength = storage.length
+            if targetString.length > currentLength,
+               targetString.substring(to: currentLength) == storage.string {
+                storage.append(target.attributedSubstring(
+                    from: NSRange(location: currentLength, length: targetString.length - currentLength)
+                ))
+            } else if !targetString.isEqual(to: storage.string) {
+                storage.setAttributedString(target)
+            }
+        }
+
+        private func attributes(for role: PageModeLayout.TextBlock.Role) -> [NSAttributedString.Key: Any] {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineSpacing = 4
+            // 对照 pairs read as units: a source paragraph sits tight above its
+            // translation (4), and the gap between pairs is wide (14).
+            paragraph.paragraphSpacing = role == .source ? 4 : 14
+            let color: NSColor = role == .translation ? .labelColor : .secondaryLabelColor
+            return [
+                .font: NSFont.systemFont(ofSize: 14),
+                .foregroundColor: color,
+                .paragraphStyle: paragraph,
+            ]
+        }
+
+        private func scheduleHeightReport(force: Bool) {
+            if reachedHeightCeiling, !force { return }
+            forceNextHeightReport = forceNextHeightReport || force
+            guard !heightReportScheduled else { return }
+            heightReportScheduled = true
+            let delay: TimeInterval = force ? 0 : 0.12
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                self.heightReportScheduled = false
+                let forceReport = self.forceNextHeightReport
+                self.forceNextHeightReport = false
+                guard let handler = self.onContentHeightChange,
+                      let textView = self.textView,
+                      let lm = textView.textLayoutManager else { return }
+                lm.ensureLayout(for: lm.documentRange)
+                let height = lm.usageBoundsForTextContainer.height
+                    + textView.textContainerInset.height * 2
+                self.reachedHeightCeiling = height >= self.heightCeiling - 1
+                guard forceReport || abs(height - self.lastReportedHeight) > 1 else { return }
+                self.lastReportedHeight = height
+                handler(height)
+            }
         }
 
         deinit { NotificationCenter.default.removeObserver(self) }

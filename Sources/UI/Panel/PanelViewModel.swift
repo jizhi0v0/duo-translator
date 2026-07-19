@@ -9,10 +9,14 @@ final class PanelViewModel: ObservableObject {
     /// Page mode: widen the panel and show one provider's output large, with a
     /// provider selector on top, instead of the stacked compact cards.
     @Published var pageMode = false
+    /// Changes on every entry into page mode. Giving the AppKit-backed reader a
+    /// fresh SwiftUI identity prevents a previously detached backing layer from
+    /// being shown for one frame when the user repeatedly switches modes.
+    @Published private(set) var pageModePresentationID = 0
     /// Which provider is shown in page mode (engine profile UUID). Falls back to
     /// the first run when nil or absent.
     @Published var pageProviderID: String?
-    /// Page mode content: true = bilingual side-by-side (原文|译文), false = 仅译文.
+    /// Page mode content: true = complete original + translation, false = 仅译文.
     @Published var pageBilingual = true
     /// Cards the user collapsed, keyed by engine profile UUID. Session-scoped
     /// and kept across runs (run models are rebuilt every run, so this state
@@ -34,6 +38,11 @@ final class PanelViewModel: ObservableObject {
     @Published var resultAreaBudget: CGFloat = 400
 
     let run = TranslationRunController()
+
+    func togglePageMode() {
+        if !pageMode { pageModePresentationID &+= 1 }
+        pageMode.toggle()
+    }
 
     /// Shared debounce channel for user-initiated translate triggers (Enter key
     /// and language swaps/changes): a burst collapses to a single run for the

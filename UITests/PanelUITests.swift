@@ -41,6 +41,19 @@ final class PanelUITests: XCTestCase {
         app.groups.firstMatch
     }
 
+    private func waitUntil(
+        timeout: TimeInterval,
+        pollEvery: useconds_t = 30_000,
+        _ condition: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            usleep(pollEvery)
+        }
+        return condition()
+    }
+
     /// Clicks the copy button until it reports the "copied" confirmation. The
     /// panel is a non-activating accessory window, which can drop the first
     /// synthesized click just after appearing; retrying makes it deterministic.
@@ -62,12 +75,19 @@ final class PanelUITests: XCTestCase {
     }
 
     @discardableResult
-    private func launch(seed: String, results: Int) -> XCUIApplication {
+    private func launch(
+        seed: String,
+        results: Int,
+        streaming: Bool = false,
+        resultText: String? = nil
+    ) -> XCUIApplication {
         app?.terminate()
         let a = XCUIApplication()
         a.launchArguments += ["-uiTest"]
         a.launchEnvironment["UITEST_INPUT"] = seed
         a.launchEnvironment["UITEST_RESULTS"] = String(results)
+        if streaming { a.launchEnvironment["UITEST_STREAMING"] = "1" }
+        if let resultText { a.launchEnvironment["UITEST_RESULT_TEXT"] = resultText }
         a.launch()
         app = a
         XCTAssertTrue(a.buttons.matching(identifier: "result.copy").firstMatch.waitForExistence(timeout: 10),
@@ -90,6 +110,83 @@ final class PanelUITests: XCTestCase {
         let app = launch(seed: "hi")
         XCTAssertEqual(panel(app).frame.width, 400, accuracy: 8,
                        "panel width should be ~400pt (was \(panel(app).frame.width))")
+    }
+
+    func testPageModeSwitchesWidthAndReturnsToCompactLayout() {
+        let app = launch(seed: "short source", results: 1)
+        let pageMode = app.buttons["toolbar.pageMode"]
+        XCTAssertTrue(pageMode.waitForExistence(timeout: 10))
+
+        pageMode.click()
+        XCTAssertTrue(waitUntil(timeout: 3) { self.panel(app).frame.width > 600 },
+                      "page mode never installed its wide layout")
+        XCTAssertTrue(waitUntil(timeout: 3) { self.panel(app).frame.height > 700 },
+                      "the long completed result never fitted to page height")
+        let firstPageHeight = panel(app).frame.height
+        XCTAssertGreaterThan(panel(app).frame.height, 0)
+        XCTAssertLessThanOrEqual(panel(app).frame.height, 761)
+
+        pageMode.click()
+        XCTAssertTrue(waitUntil(timeout: 3) { abs(self.panel(app).frame.width - 400) < 8 },
+                      "compact mode never restored its layout")
+        XCTAssertGreaterThan(panel(app).frame.height, 0)
+
+        // Re-entering with unchanged text still needs a fresh measurement. The
+        // TextKit reader used to suppress it as a duplicate, leaving the panel
+        // stuck at the compact mode's height with an old backing-store snapshot.
+        pageMode.click()
+        XCTAssertTrue(waitUntil(timeout: 3) { self.panel(app).frame.width > 600 },
+                      "page mode did not reopen on the second switch")
+        XCTAssertTrue(waitUntil(timeout: 3) {
+            abs(self.panel(app).frame.height - firstPageHeight) < 5
+        }, "second page-mode entry never restored its measured height")
+    }
+
+    func testImmediatePageModeSwitchWhileStreamingStaysCompact() {
+        let app = launch(seed: "source waiting for its first chunk", results: 1, streaming: true)
+        let pageMode = app.buttons["toolbar.pageMode"]
+        XCTAssertTrue(pageMode.waitForExistence(timeout: 10))
+
+        pageMode.click()
+        XCTAssertTrue(waitUntil(timeout: 3) { self.panel(app).frame.width > 600 },
+                      "page mode never installed its wide layout")
+        XCTAssertLessThan(panel(app).frame.height, 600,
+                          "an unmeasured loading page must not stretch to the 760pt ceiling")
+    }
+
+    func testPageReaderKeepsEveryParagraphAfterCompletedSwitch() {
+        let tail = "UITEST_COMPLETED_TRANSLATION_TAIL"
+        let translation = "first paragraph\n\nsecond paragraph\nthird paragraph\n\(tail)"
+        let app = launch(
+            seed: "single source paragraph",
+            results: 1,
+            resultText: translation
+        )
+        app.buttons["toolbar.pageMode"].click()
+
+        let reader = app.textViews["page.reader"]
+        XCTAssertTrue(reader.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil(timeout: 5) {
+            (reader.value as? String)?.contains(tail) == true
+        }, "completed page mode dropped translation paragraphs after the first source paragraph")
+    }
+
+    func testPageReaderReceivesStreamTailAfterMidStreamSwitch() {
+        let tail = "UITEST_STREAMING_TRANSLATION_TAIL"
+        let translation = String(repeating: "streaming paragraph content. ", count: 18) + tail
+        let app = launch(
+            seed: "source waiting while page mode opens",
+            results: 1,
+            streaming: true,
+            resultText: translation
+        )
+        app.buttons["toolbar.pageMode"].click()
+
+        let reader = app.textViews["page.reader"]
+        XCTAssertTrue(reader.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil(timeout: 8) {
+            (reader.value as? String)?.contains(tail) == true
+        }, "page reader stopped receiving chunks after the mode switch")
     }
 
     // MARK: - Adaptive input height (grows with content across lengths)

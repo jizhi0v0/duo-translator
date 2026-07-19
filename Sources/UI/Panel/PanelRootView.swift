@@ -5,7 +5,9 @@ import SwiftUI
 struct PanelRootView: View {
     @ObservedObject var viewModel: PanelViewModel
     @ObservedObject var run: TranslationRunController
-    var onContentHeightChange: (CGFloat) -> Void
+    /// Includes the mode that produced the measurement so a late callback from
+    /// the outgoing view can never resize the newly-switched window.
+    var onContentHeightChange: (_ pageMode: Bool, _ height: CGFloat) -> Void
     /// Measured height of everything above the result list (toolbar, input,
     /// language bar, divider). Reported so the window fits exactly instead of
     /// relying on a fixed estimate that leaves a gap when the input is short.
@@ -27,6 +29,11 @@ struct PanelRootView: View {
                     .padding(.horizontal, 12)
                     .padding(.top, 8)
                     .padding(.bottom, 6)
+                    // The toolbar strip is the panel's only drag region (window-
+                    // background dragging is off so scrollbars scroll instead of
+                    // moving the window). The handle sits behind the buttons, so
+                    // empty toolbar space drags and the buttons still click.
+                    .background(WindowDragHandle())
 
                 InputSectionView(viewModel: viewModel, run: run)
                     .padding(.horizontal, 12)
@@ -45,13 +52,14 @@ struct PanelRootView: View {
                 PageModeView(
                     viewModel: viewModel,
                     run: run,
-                    onResultsHeightChange: onContentHeightChange
+                    onResultsHeightChange: { onContentHeightChange(true, $0) }
                 )
+                .id(viewModel.pageModePresentationID)
             } else {
                 ResultListView(
                     viewModel: viewModel,
                     run: run,
-                    onResultsHeightChange: onContentHeightChange
+                    onResultsHeightChange: { onContentHeightChange(false, $0) }
                 )
             }
 

@@ -11,18 +11,32 @@ final class TranslatorPanel: NSPanel {
     }
 }
 
-/// Hosting view that lets the window be dragged from any empty SwiftUI region.
-/// Interactive controls (text fields, buttons) return `false` from
-/// `mouseDownCanMoveWindow` on their own, so they still receive their clicks;
-/// only the empty background hits this view, which reports `true` and hands the
-/// drag to AppKit via `isMovableByWindowBackground`.
-final class DraggableHostingView<Content: View>: NSHostingView<Content> {
-    override var mouseDownCanMoveWindow: Bool { true }
-
+/// Hosting view for the panel content. Window dragging is NOT window-background
+/// based (`isMovableByWindowBackground` is off): with it on, any drag that no
+/// interactive control claimed — including the result scrollbars, whose
+/// `mouseDownCanMoveWindow` overrides are ignored inside the hosting hierarchy —
+/// moved the whole window. Dragging is opted IN instead, only via the toolbar's
+/// `WindowDragHandle` (see `PanelRootView`).
+final class PanelHostingView<Content: View>: NSHostingView<Content> {
     /// Act on the first click even when the panel isn't key. Without this the
     /// non-activating panel eats the first click just to become key, so a
     /// toolbar button (e.g. page mode) needs a wasted second click to register.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+/// AppKit view that starts a window drag on mouse-down. Placed behind the
+/// toolbar row (and only there), it makes the top chrome the panel's single
+/// drag region; buttons layered above it still receive their own clicks.
+struct WindowDragHandle: NSViewRepresentable {
+    final class DragView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    }
+
+    func makeNSView(context: Context) -> NSView { DragView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 /// Owns the floating translator panel: positioning near the mouse, key-window
@@ -52,6 +66,22 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// re-fits against the current value of the other.
     private var chromeHeightMeasured: CGFloat = chromeHeight
     private var resultHeightMeasured: CGFloat = 0
+    /// Last good measurement for each layout mode, tied to the translation run
+    /// that produced it. A completed run can switch back to either mode using
+    /// the target mode's own height in the same window-frame update, instead of
+    /// briefly stretching the outgoing mode's backing snapshot.
+    private struct CachedResultHeight {
+        let height: CGFloat
+        let runGeneration: Int
+    }
+    private var cachedResultHeights: [Bool: CachedResultHeight] = [:]
+    /// Mode that produced `resultHeightMeasured`. During a cards ↔ page switch,
+    /// the outgoing view can report once more after the model has changed; that
+    /// stale height must never be fitted against the new layout.
+    private var resultMeasurementPageMode = false
+    /// Set when the new mode's width is installed before its first height has
+    /// arrived. While set, `refit` holds the current window height.
+    private var awaitingResultMeasurementForPageMode: Bool?
 
     /// Initial estimate for the chrome above the result list; replaced by a
     /// live measurement once the view lays out.
@@ -62,10 +92,9 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// Floor for content-driven fit. Kept low so the empty / no-result state
     /// pulls in tight instead of leaving a blank block under the placeholder.
     private static let minFittedHeight: CGFloat = 220
-    /// Hard ceiling for content-driven growth. Beyond this the result body
-    /// scrolls instead of the window getting taller (also clamped to the
-    /// screen). Sized so a single card can grow to its full body height
-    /// (`ResultCardView.maxBodyHeight`) with the header/footer still visible.
+    /// Hard ceiling for content-driven growth (input, card count, expanded
+    /// thinking, and page mode). Compact result bodies themselves use stable
+    /// viewports and scroll internally instead of resizing while streaming.
     private static let maxHeight: CGFloat = 760
     /// Margin kept above and below the panel when it fills a tall screen.
     private static let screenPadding: CGFloat = 24
@@ -94,7 +123,11 @@ final class PanelController: NSObject, NSWindowDelegate {
         )
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
-        panel.isMovableByWindowBackground = true
+        // Dragging is toolbar-only (`WindowDragHandle`). Window-background
+        // dragging is explicitly off: it treated any unclaimed drag — notably
+        // on the result scrollbars — as a window move, so dragging a scrollbar
+        // dragged the whole panel instead of scrolling.
+        panel.isMovableByWindowBackground = false
         // Hide all native traffic-light buttons: on this transparent glass panel
         // the red close dot floated detached in the top-left corner. The panel
         // draws its own toolbar (pin / close) instead, and Esc still closes via
@@ -122,10 +155,8 @@ final class PanelController: NSObject, NSWindowDelegate {
         let root = PanelRootView(
             viewModel: viewModel,
             run: viewModel.run,
-            onContentHeightChange: { [weak self] contentHeight in
-                guard let self else { return }
-                self.resultHeightMeasured = contentHeight
-                self.refit()
+            onContentHeightChange: { [weak self] pageMode, contentHeight in
+                self?.acceptResultHeight(contentHeight, pageMode: pageMode)
             },
             onChromeHeightChange: { [weak self] chromeHeight in
                 guard let self else { return }
@@ -139,7 +170,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             onModeChange: { [weak self] pageMode in self?.applyModeWidth(pageMode: pageMode) },
             onClose: { [weak self] in self?.close() }
         )
-        let hostingView = DraggableHostingView(rootView: root)
+        let hostingView = PanelHostingView(rootView: root)
         // With `.titled` + `.fullSizeContentView` the hosting view otherwise
         // inherits a top safe-area inset matching the (transparent) titlebar,
         // which pushes the glass body down and leaves an invisible transparent
@@ -154,7 +185,27 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// horizontal center fixed and staying on screen. Height is left to `refit`.
     private func applyModeWidth(pageMode: Bool) {
         let targetWidth = pageMode ? Self.pageModeWidth : Self.defaultSize.width
-        guard abs(panel.frame.width - targetWidth) > 1 else { return }
+
+        // For a stable, completed run, reuse the target mode's own last height.
+        // Width and height are then installed without displaying the in-between
+        // frame, so WindowServer never stretches the outgoing backing store.
+        if let cached = reusableResultHeight(forPageMode: pageMode) {
+            resultHeightMeasured = cached
+            resultMeasurementPageMode = pageMode
+            awaitingResultMeasurementForPageMode = nil
+        } else {
+            // If the new SwiftUI view reported before this onChange callback,
+            // keep that measurement. Otherwise hold until the first new-mode
+            // value arrives; an in-flight translation must not reuse an older
+            // page height whose text may have grown while hidden.
+            awaitingResultMeasurementForPageMode =
+                resultMeasurementPageMode == pageMode ? nil : pageMode
+        }
+
+        guard abs(panel.frame.width - targetWidth) > 1 else {
+            refit()
+            return
+        }
 
         var frame = panel.frame
         let centerX = frame.midX
@@ -169,12 +220,54 @@ final class PanelController: NSObject, NSWindowDelegate {
                 frame.origin.x = visible.minX + Self.screenPadding
             }
         }
-        panel.setFrame(frame, display: true, animate: false)
-        refit()
+        // Neither intermediate frame is displayed: `refit` applies a cached
+        // target-mode height when available, then the newly-created SwiftUI /
+        // AppKit subtree is laid out and painted before the next window flush.
+        panel.setFrame(frame, display: false, animate: false)
+        refit(display: false)
+        panel.contentView?.layoutSubtreeIfNeeded()
+        panel.contentView?.needsDisplay = true
+        panel.displayIfNeeded()
+        panel.invalidateShadow()
         // The mode swap (cards ↔ page view) and the width change both relayout
         // asynchronously; a deferred pass fits the height once the new content
         // has reported its geometry, so the switch settles without a second click.
         DispatchQueue.main.async { [weak self] in self?.refit() }
+    }
+
+    /// Accept only a measurement produced by the currently-visible mode. The
+    /// mode view can be created before `onModeChange` runs, so if its width is
+    /// not installed yet we cache the value but defer fitting until the width
+    /// update makes the two pieces of layout state consistent.
+    private func acceptResultHeight(_ height: CGFloat, pageMode: Bool) {
+        guard pageMode == viewModel.pageMode else { return }
+        resultHeightMeasured = height
+        resultMeasurementPageMode = pageMode
+        cachedResultHeights[pageMode] = CachedResultHeight(
+            height: height,
+            runGeneration: viewModel.run.runGeneration
+        )
+        if awaitingResultMeasurementForPageMode == pageMode {
+            awaitingResultMeasurementForPageMode = nil
+        }
+
+        let targetWidth = pageMode ? Self.pageModeWidth : Self.defaultSize.width
+        guard abs(panel.frame.width - targetWidth) <= 1 else { return }
+        refit()
+    }
+
+    /// Cached measurements are safe for an unchanged, settled run. Streaming
+    /// output can change while its mode is hidden, so that path always waits for
+    /// a fresh TextKit/SwiftUI measurement instead of flashing a stale height.
+    private func reusableResultHeight(forPageMode pageMode: Bool) -> CGFloat? {
+        guard !viewModel.run.runs.isEmpty,
+              viewModel.run.runs.allSatisfy({ run in
+                  if case .streaming = run.state { return false }
+                  return true
+              }),
+              let cached = cachedResultHeights[pageMode],
+              cached.runGeneration == viewModel.run.runGeneration else { return nil }
+        return min(cached.height, viewModel.resultAreaBudget)
     }
 
     // MARK: - Presentation
@@ -249,14 +342,27 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// cards (long body text) so tests can verify the result area fits on screen
     /// and scrolls. Seeds after showing so `showInput`'s clear doesn't wipe them;
     /// the cards' geometry callbacks then drive `refit` as in a real translation.
-    func uiTestPresent(input: String, resultCount: Int) {
+    func uiTestPresent(
+        input: String,
+        resultCount: Int,
+        streaming: Bool = false,
+        resultText: String? = nil
+    ) {
         viewModel.inputText = input
         showInput()
         if resultCount > 0 {
+            let seededText = resultText ?? String(
+                repeating: "结果卡片正文，用于验证长译文时底部可以滚动、不会被遮挡。",
+                count: 40
+            )
             viewModel.run.uiTestSeedResults(
                 count: resultCount,
-                text: String(repeating: "结果卡片正文，用于验证长译文时底部可以滚动、不会被遮挡。", count: 40)
+                text: seededText,
+                streaming: streaming
             )
+            if streaming, resultText != nil {
+                viewModel.run.uiTestStreamFirstResult(text: seededText)
+            }
         } else {
             viewModel.run.clear()
         }
@@ -297,7 +403,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// only moves the bottom, so the header stays under the pointer. This avoids
     /// the window jumping around (a centered fit repositions on every change).
     /// Past the ceiling the result body scrolls internally instead of growing.
-    private func refit() {
+    private func refit(display: Bool = true) {
         guard panel.isVisible, !panel.inLiveResize else { return }
         // Don't resize under the user's fingers: hold the fit and re-apply it
         // when the scroll settles (see `noteUserScroll`).
@@ -320,8 +426,19 @@ final class PanelController: NSObject, NSWindowDelegate {
             viewModel.resultAreaBudget = budget
         }
 
+        // A mode switch is a two-part update: install the new width, then wait
+        // for that mode's content to report at the new layout. Holding here
+        // prevents the visible short → tall flash caused by fitting the outgoing
+        // mode's cached result height in between those two events.
+        guard PanelLayout.canUseResultMeasurement(
+            measuredForPageMode: resultMeasurementPageMode,
+            currentPageMode: viewModel.pageMode,
+            awaitingNewMeasurement: awaitingResultMeasurementForPageMode != nil
+        ) else { return }
+
         // Fit chrome + result (+ a small buffer so a hair-short measurement can't
-        // clip the last card), clamped to [minFittedHeight, ceiling].
+        // clip the last card), clamped to [minFittedHeight, ceiling]. Compact
+        // cards report a stable height while their text streams.
         let desired = PanelLayout.windowHeight(
             chrome: chromeHeightMeasured,
             result: resultHeightMeasured,
@@ -343,7 +460,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         if frame.maxY > visible.maxY - Self.screenPadding {
             frame.origin.y = visible.maxY - Self.screenPadding - desired
         }
-        panel.setFrame(frame, display: true, animate: false)
+        panel.setFrame(frame, display: display, animate: false)
     }
 
     // MARK: - Dismissal
@@ -413,6 +530,16 @@ final class PanelController: NSObject, NSWindowDelegate {
 /// → many lines → overflow) without a running UI. No state, no actor isolation —
 /// just the formulas the views feed their live measurements into.
 enum PanelLayout {
+    /// A result height is fit only when it belongs to the visible mode and no
+    /// first measurement for that mode is outstanding.
+    static func canUseResultMeasurement(
+        measuredForPageMode: Bool,
+        currentPageMode: Bool,
+        awaitingNewMeasurement: Bool
+    ) -> Bool {
+        !awaitingNewMeasurement && measuredForPageMode == currentPageMode
+    }
+
     /// Window height fitted to `chrome + result` (plus `buffer`), clamped to
     /// `[floor, ceiling]`. Grows with content and never exceeds the ceiling.
     static func windowHeight(
@@ -455,10 +582,10 @@ enum PanelLayout {
         return bodyVInset * 2 + k * bodyLineHeight + (k - 1) * bodyLineSpacing
     }
 
-    /// Resolved result-body height: at least `min`, growing with the measured
-    /// text height, but never past the line-aligned `cap`. Content that fits
-    /// shows at its exact height; only overflow is clamped (to a whole-line cap).
-    static func resolvedBodyHeight(text: CGFloat, min minH: CGFloat, cap: CGFloat) -> CGFloat {
-        Swift.min(Swift.max(text, minH), lineAlignedBodyHeight(atMost: cap))
+    /// Stable compact-card body height. It is deliberately independent of the
+    /// streamed text length: content growth must scroll inside the card instead
+    /// of moving every card below it and resizing the panel on each new line.
+    static func stableBodyHeight(preferred: CGFloat, cap: CGFloat) -> CGFloat {
+        lineAlignedBodyHeight(atMost: Swift.min(preferred, cap))
     }
 }

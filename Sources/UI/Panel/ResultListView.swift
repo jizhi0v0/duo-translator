@@ -2,9 +2,9 @@ import SwiftUI
 
 /// Vertically stacked result cards, one per enabled engine. Uses a plain VStack
 /// (no outer ScrollView): the stack is intrinsically sized, so its measured
-/// height is reliable and the window fits it exactly. Each card body scrolls
-/// internally (its own NSScrollView) once it hits `perCardMaxBody`, so long
-/// output never forces the stack itself to scroll and push titles off-screen.
+/// height is reliable and the window fits it exactly. Each card reserves a
+/// stable body viewport and scrolls internally (its own NSScrollView), so live
+/// output never pushes later cards or repeatedly resizes the panel.
 struct ResultListView: View {
     @ObservedObject var viewModel: PanelViewModel
     @ObservedObject var run: TranslationRunController

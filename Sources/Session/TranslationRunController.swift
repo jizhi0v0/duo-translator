@@ -176,6 +176,7 @@ final class TranslationRunController: ObservableObject {
                 run.stream.finish()
                 run.thinkingStream.finish()
                 let seconds = Date().timeIntervalSince(started)
+                Log.engine.debug("引擎[\(run.name, privacy: .public)] done \(String(format: "%.1f", seconds), privacy: .public)s, \(run.stream.fullText.count, privacy: .public) 字")
                 run.state = .done(seconds: seconds)
                 Self.record(run, source: detected, target: target,
                             inputChars: inputChars, duration: seconds, status: .success)
@@ -248,21 +249,57 @@ final class TranslationRunController: ObservableObject {
     }
 
     /// UI-test seam (driven by the `-uiTest` launch): replace the runs with
-    /// `count` completed cards carrying `text`, so tests can exercise the
-    /// result-area sizing/scrolling without a live translation. Inert unless
-    /// called from the UI-test launch path.
-    func uiTestSeedResults(count: Int, text: String) {
+    /// `count` cards carrying `text`, so tests can exercise result-area sizing
+    /// without a live translation. `streaming` leaves the cards in their initial
+    /// no-content loading state, which covers immediate page-mode switching.
+    /// Inert unless called from the UI-test launch path.
+    func uiTestSeedResults(count: Int, text: String, streaming: Bool = false) {
         cancelAll()
         let names = ["OpenAI", "Apple 翻译", "DeepL"]
         runs = (0..<max(count, 1)).map { i in
             let run = EngineRunModel(id: "uitest-\(i)", name: names[i % names.count], kind: .openAICompat)
-            run.stream.replaceAll(text)
-            run.stream.finish()
-            run.hasContent = true
-            run.state = .done(seconds: 0.5)
+            if !streaming {
+                run.stream.replaceAll(text)
+                run.stream.finish()
+                run.hasContent = true
+                run.state = .done(seconds: 0.5)
+            }
             return run
         }
         detectedLanguage = "en"
         targetLanguage = "zh-Hans"
+    }
+
+    /// UI-test-only deterministic stream. It waits long enough for automation
+    /// to enter page mode, then emits several chunks so the test can prove the
+    /// AppKit reader receives deltas after the mode switch and reaches the tail.
+    func uiTestStreamFirstResult(text: String) {
+        guard let run = runs.first, !text.isEmpty else { return }
+        let chunks = Self.uiTestChunks(text, count: 6)
+        tasks[run.id] = Task { @MainActor [weak run] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, let run else { return }
+            for chunk in chunks {
+                guard !Task.isCancelled else { return }
+                run.hasContent = true
+                run.stream.append(chunk)
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            guard !Task.isCancelled else { return }
+            run.stream.finish()
+            run.state = .done(seconds: 1.5)
+        }
+    }
+
+    private static func uiTestChunks(_ text: String, count: Int) -> [String] {
+        let size = max(1, Int(ceil(Double(text.count) / Double(max(count, 1)))))
+        var chunks: [String] = []
+        var start = text.startIndex
+        while start < text.endIndex {
+            let end = text.index(start, offsetBy: size, limitedBy: text.endIndex) ?? text.endIndex
+            chunks.append(String(text[start..<end]))
+            start = end
+        }
+        return chunks
     }
 }

@@ -8,17 +8,19 @@ struct ResultCardView: View {
     @Binding var isCollapsed: Bool
     /// BCP-47 code of the run's target language, for voice selection.
     var targetLanguage: String?
-    /// "Grow until here, then scroll" ceiling for this card's body. Passed in so
-    /// it can shrink when several providers share the window (keeping every
-    /// header visible); past it the body scrolls internally via TextKit 2.
+    /// Ceiling for this card's stable body viewport. Passed in so the viewport
+    /// can shrink when several providers share the window (keeping every header
+    /// visible); overflow scrolls internally via TextKit 2.
     var maxBodyHeight: CGFloat
     var onRetry: () -> Void
     /// Apple language-pack download, invoked from the in-card prompt.
     var onDownloadApple: (String?, String) -> Void
 
-    @State private var textHeight: CGFloat = 44
-
-    private static let minBodyHeight: CGFloat = 44
+    /// A compact, readable viewport that is reserved as soon as the card
+    /// appears. Keeping it constant is important: if it followed the streamed
+    /// text's natural height, every new line would push the cards below it and
+    /// repeatedly resize the whole panel.
+    private static let preferredBodyHeight: CGFloat = 96
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,49 +36,29 @@ struct ResultCardView: View {
                         thinkingSection
                         Divider().padding(.horizontal, 10)
                     }
-                    // Always mounted (even before the first chunk) so SwiftUI
-                    // sizes it to the real width up front — measuring an empty
-                    // buffer yields the minimum height, and text then streams in
-                    // without a wrong-width height spike. A "翻译中…" overlay
-                    // stands in until the first chunk lands.
-                    StreamingTextView(
-                        model: engineRun.stream,
-                        onContentHeightChange: { textHeight = $0 }
-                    )
-                    // Before the first chunk, force the minimum height. This is
-                    // independent of `textHeight`, so a stale measurement left
-                    // over from the previous run (re-translate reuses the card)
-                    // can't balloon the empty box — a known race in the height
-                    // reset. Once content lands, the measured height takes over.
-                    .frame(height: isAwaitingContent
-                        ? Self.minBodyHeight
-                        : PanelLayout.resolvedBodyHeight(
-                            text: textHeight, min: Self.minBodyHeight, cap: maxBodyHeight))
-                    .overlay(alignment: .topLeading) {
-                        if isAwaitingContent {
-                            // Match the streamed text exactly — same 14pt size and
-                            // the NSTextView's 10/8 inset — so when the first chunk
-                            // replaces this placeholder the glyphs don't shift size
-                            // or position. Only the content (and its color) changes,
-                            // so the swap reads as a clean replacement instead of a
-                            // flicker where the text jumps as it turns white.
-                            Text("翻译中…")
-                                .font(.system(size: 14))
-                                .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 8)
+                    // Always mounted at a stable height. Streaming changes only
+                    // the text storage; it never changes the card/window layout.
+                    StreamingTextView(model: engineRun.stream)
+                        .frame(height: stableBodyHeight)
+                        .overlay(alignment: .topLeading) {
+                            if isAwaitingContent {
+                                // Match the streamed text exactly — same 14pt size and
+                                // the NSTextView's 10/8 inset — so when the first chunk
+                                // replaces this placeholder the glyphs don't shift size
+                                // or position. Only the content (and its color) changes,
+                                // so the swap reads as a clean replacement instead of a
+                                // flicker where the text jumps as it turns white.
+                                Text("翻译中…")
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                            }
                         }
-                    }
                     Divider().padding(.horizontal, 10)
                     footer
                 }
             }
-        }
-        .onChange(of: isAwaitingContent) { _, awaiting in
-            // A fresh run reuses this card; drop the previous run's measured
-            // height so streaming grows from the minimum instead of spiking to
-            // the old (possibly maximal) value before the new text is measured.
-            if awaiting { textHeight = Self.minBodyHeight }
         }
         // A soft shadow lifts each card off the glass panel so the results read
         // as distinct surfaces stacked above the chrome, not shapes blended into
@@ -160,6 +142,15 @@ struct ResultCardView: View {
     private var isAwaitingContent: Bool {
         if case .streaming = engineRun.state { return !engineRun.hasContent }
         return false
+    }
+
+    /// Snap to a whole-line height so the viewport never exposes a clipped last
+    /// line. This value depends only on the run layout, never streamed content.
+    private var stableBodyHeight: CGFloat {
+        PanelLayout.stableBodyHeight(
+            preferred: Self.preferredBodyHeight,
+            cap: maxBodyHeight
+        )
     }
 
     private func downloadBody(source: String?, target: String) -> some View {

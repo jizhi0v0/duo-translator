@@ -7,6 +7,38 @@ import XCTest
 /// whole range so a regression that breaks the UI at some length is caught.
 final class PanelLayoutTests: XCTestCase {
 
+    // MARK: - Page-mode output height
+
+    func testUnmeasuredPageOutputUsesLoadingFloorInsteadOfFullBudget() {
+        XCTAssertEqual(
+            PageModeLayout.outputHeight(measured: nil, floor: 80, cap: 500),
+            80
+        )
+    }
+
+    func testMeasuredPageOutputGrowsAndCaps() {
+        XCTAssertEqual(PageModeLayout.outputHeight(measured: 140, floor: 80, cap: 500), 140)
+        XCTAssertEqual(PageModeLayout.outputHeight(measured: 900, floor: 80, cap: 500), 500)
+    }
+
+    // MARK: - Mode-switch measurement gating
+
+    func testModeSwitchRejectsOutgoingModeMeasurement() {
+        XCTAssertFalse(PanelLayout.canUseResultMeasurement(
+            measuredForPageMode: false,
+            currentPageMode: true,
+            awaitingNewMeasurement: true
+        ))
+    }
+
+    func testModeSwitchAcceptsFreshMeasurementFromVisibleMode() {
+        XCTAssertTrue(PanelLayout.canUseResultMeasurement(
+            measuredForPageMode: true,
+            currentPageMode: true,
+            awaitingNewMeasurement: false
+        ))
+    }
+
     // MARK: - Window fit (grows with content, clamped to floor/ceiling)
 
     func testWindowHeightClampsToFloorForEmptyContent() {
@@ -150,37 +182,17 @@ final class PanelLayoutTests: XCTestCase {
         }
     }
 
-    // MARK: - Resolved body height (fits exactly, or clamps to a whole-line cap)
+    // MARK: - Stable result body (streaming never changes card/window height)
 
-    func testResolvedBodyHeightUsesMinForShortText() {
-        XCTAssertEqual(PanelLayout.resolvedBodyHeight(text: 10, min: 44, cap: 158), 44)
+    func testStableBodyHeightUsesPreferredViewportWhenItFits() {
+        let h = PanelLayout.stableBodyHeight(preferred: 96, cap: 300)
+        XCTAssertEqual(h, PanelLayout.lineAlignedBodyHeight(atMost: 96))
+        XCTAssertLessThanOrEqual(h, 96)
     }
 
-    func testResolvedBodyHeightShowsExactHeightWhenItFits() {
-        // Medium text that fits under the cap renders at its real height (no snap,
-        // no scroll) so short/medium translations aren't padded or clipped.
-        let cap: CGFloat = 300
-        let text: CGFloat = 120
-        XCTAssertEqual(PanelLayout.resolvedBodyHeight(text: text, min: 44, cap: cap), text)
-    }
-
-    func testResolvedBodyHeightClampsLongTextToWholeLineCap() {
-        let cap: CGFloat = 158
-        let resolved = PanelLayout.resolvedBodyHeight(text: 5000, min: 44, cap: cap)
-        XCTAssertLessThanOrEqual(resolved, cap)
-        XCTAssertEqual(resolved, PanelLayout.lineAlignedBodyHeight(atMost: cap))
-    }
-
-    func testResolvedBodyHeightStaysWithinBoundsAcrossLengths() {
-        let cap: CGFloat = 200
-        let alignedCap = PanelLayout.lineAlignedBodyHeight(atMost: cap)
-        var previous: CGFloat = 0
-        for text in stride(from: CGFloat(0), through: 4000, by: 17) {
-            let h = PanelLayout.resolvedBodyHeight(text: text, min: 44, cap: cap)
-            XCTAssertGreaterThanOrEqual(h, 44)
-            XCTAssertLessThanOrEqual(h, alignedCap)
-            XCTAssertGreaterThanOrEqual(h, previous)
-            previous = h
-        }
+    func testStableBodyHeightHonorsTighterPerCardCap() {
+        let h = PanelLayout.stableBodyHeight(preferred: 96, cap: 72)
+        XCTAssertEqual(h, PanelLayout.lineAlignedBodyHeight(atMost: 72))
+        XCTAssertLessThanOrEqual(h, 72)
     }
 }

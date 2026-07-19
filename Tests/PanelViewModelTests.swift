@@ -8,6 +8,23 @@ import XCTest
 @MainActor
 final class PanelViewModelTests: XCTestCase {
 
+    func testEachPageModeEntryGetsFreshPresentationIdentity() {
+        let vm = PanelViewModel()
+        let initial = vm.pageModePresentationID
+
+        vm.togglePageMode()
+        XCTAssertTrue(vm.pageMode)
+        XCTAssertEqual(vm.pageModePresentationID, initial + 1)
+
+        vm.togglePageMode()
+        XCTAssertFalse(vm.pageMode)
+        XCTAssertEqual(vm.pageModePresentationID, initial + 1)
+
+        vm.togglePageMode()
+        XCTAssertTrue(vm.pageMode)
+        XCTAssertEqual(vm.pageModePresentationID, initial + 2)
+    }
+
     func testEnterDebounceCoalescesBurstToSingleRun() async {
         let vm = PanelViewModel()
         vm.debounceDelay = .milliseconds(20)

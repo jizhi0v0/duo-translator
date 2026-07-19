@@ -25,8 +25,18 @@ final class AppCoordinator {
     /// `AppDelegate`): shows the panel with deterministic seed text — and, when
     /// `resultCount > 0`, that many fake completed result cards — so tests can
     /// drive sizing/feedback/scrolling without simulating hotkeys or the network.
-    func uiTestShowPanel(seed: String, resultCount: Int = 0) {
-        panel.uiTestPresent(input: seed, resultCount: resultCount)
+    func uiTestShowPanel(
+        seed: String,
+        resultCount: Int = 0,
+        streaming: Bool = false,
+        resultText: String? = nil
+    ) {
+        panel.uiTestPresent(
+            input: seed,
+            resultCount: resultCount,
+            streaming: streaming,
+            resultText: resultText
+        )
     }
 
     /// Shared entry for selection / OCR flows (M2 / M3).
@@ -80,6 +90,21 @@ final class AppCoordinator {
                 panel.showNotice(error.localizedDescription)
             }
         }
+    }
+
+    /// Debug hooks (distributed notifications, see `AppDelegate`): drive the
+    /// panel remotely over SSH — page mode / pin toggles and close, so scripted
+    /// runs can exercise the same paths as toolbar clicks.
+    func debugTogglePageMode() {
+        panel.viewModel.togglePageMode()
+    }
+
+    func debugTogglePin() {
+        panel.viewModel.isPinned.toggle()
+    }
+
+    func debugClosePanel() {
+        panel.close()
     }
 
     func openSettings() {

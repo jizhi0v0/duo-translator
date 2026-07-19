@@ -30,7 +30,7 @@ struct PanelToolbarView: View {
                     isActive: viewModel.pageMode,
                     help: viewModel.pageMode ? "退出页面模式" : "页面模式（大视图 / 双语对照）"
                 ) {
-                    viewModel.pageMode.toggle()
+                    viewModel.togglePageMode()
                 }
                 .accessibilityIdentifier("toolbar.pageMode")
             }

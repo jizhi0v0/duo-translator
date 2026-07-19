@@ -34,7 +34,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let env = ProcessInfo.processInfo.environment
             let seed = env["UITEST_INPUT"] ?? ""
             let resultCount = Int(env["UITEST_RESULTS"] ?? "") ?? 0
-            coordinator.uiTestShowPanel(seed: seed, resultCount: resultCount)
+            let streaming = env["UITEST_STREAMING"] == "1"
+            coordinator.uiTestShowPanel(
+                seed: seed,
+                resultCount: resultCount,
+                streaming: streaming,
+                resultText: env["UITEST_RESULT_TEXT"]
+            )
         } else {
             // Warm the panel off-screen once launch settles, so the first 划词
             // skips the lazy build + first-layout stall. Deferred so it never
@@ -52,9 +58,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         center.addObserver(
             forName: Notification.Name("dev.bobby.duo.debug.openSettings"),
             object: nil, queue: .main
-        ) { _ in
-            Task { @MainActor [weak self] in
+        ) { [weak self] _ in
+            Task { @MainActor in
                 self?.coordinator.openSettings()
+            }
+        }
+        // Drive a real streaming translation without hotkeys (panel debug):
+        // object carries the source text, or empty for a built-in sample.
+        center.addObserver(
+            forName: Notification.Name("dev.bobby.duo.debug.translate"),
+            object: nil, queue: .main
+        ) { [weak self] note in
+            let text = (note.object as? String).flatMap { $0.isEmpty ? nil : $0 }
+            Task { @MainActor in
+                self?.coordinator.translateText(text ?? Self.debugSampleText)
+            }
+        }
+        center.addObserver(
+            forName: Notification.Name("dev.bobby.duo.debug.pageMode"),
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.coordinator.debugTogglePageMode()
+            }
+        }
+        center.addObserver(
+            forName: Notification.Name("dev.bobby.duo.debug.pin"),
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.coordinator.debugTogglePin()
+            }
+        }
+        center.addObserver(
+            forName: Notification.Name("dev.bobby.duo.debug.close"),
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.coordinator.debugClosePanel()
             }
         }
         center.addObserver(
@@ -72,6 +113,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
+
+    /// Multi-paragraph sample for `debug.translate`, long enough that the
+    /// streamed result exercises the card viewports and page mode.
+    private static let debugSampleText = """
+    Tailscale is a mesh VPN built on WireGuard. Instead of routing all traffic \
+    through a central server, every node talks directly to every other node \
+    whenever possible, falling back to relays only when NAT traversal fails.
+
+    The control plane distributes keys and access policies, while the data \
+    plane stays peer-to-peer. This separation is what lets the network scale \
+    without the operator ever seeing your traffic.
+
+    In practice, the hardest part is NAT traversal. Home routers, carrier-grade \
+    NAT, and corporate firewalls all mangle connections differently, so the \
+    client runs a battery of probes to discover the cheapest working path.
+
+    When a direct path exists, latency is close to a plain WireGuard tunnel. \
+    When it does not, the DERP relay fleet carries encrypted packets, and the \
+    client keeps probing in the background, upgrading to a direct connection \
+    the moment one becomes available.
+    """
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 

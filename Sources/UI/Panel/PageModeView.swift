@@ -3,8 +3,8 @@ import SwiftUI
 
 /// Page mode: replaces the stacked cards with a single provider's output shown
 /// large. A provider selector sits on top; below is that provider's translation,
-/// optionally side-by-side with the original (双语对照). The panel widens in this
-/// mode (handled by `PanelController`) so two columns have room.
+/// optionally preceded by the complete original (双语对照). The panel widens in
+/// this mode (handled by `PanelController`) for a roomy reading layout.
 struct PageModeView: View {
     @ObservedObject var viewModel: PanelViewModel
     @ObservedObject var run: TranslationRunController
@@ -18,8 +18,9 @@ struct PageModeView: View {
     /// the compact cards, so short content doesn't leave a tall empty page.
     @State private var selectorHeight: CGFloat = 44
     /// nil until the reader reports its first measured height. While unmeasured
-    /// the output fills the budget (see `outputDisplayed`) so a long translation
-    /// opens at full height instead of flashing from a tiny floor up to size.
+    /// the output stays at its compact loading floor. Using the full budget here
+    /// makes the selector's first geometry update report a ceiling-sized page
+    /// when the user switches modes before the first translation chunk arrives.
     @State private var contentHeight: CGFloat?
 
     private static let outputFloor: CGFloat = 80
@@ -37,8 +38,25 @@ struct PageModeView: View {
             outputBody
                 .frame(height: outputDisplayed)
         }
-        .onAppear { onResultsHeightChange(reportedHeight) }
-        .onChange(of: reportedHeight) { _, h in onResultsHeightChange(h) }
+        // An empty streaming run has no TextKit measurement yet, so publish the
+        // compact loading height immediately. For an existing translation, keep
+        // the controller's old height until TextKit reports at the new page
+        // width; publishing the floor there would cause a short→tall flash.
+        .onAppear {
+            if selectedTextIsEmpty {
+                onResultsHeightChange(selectorHeight + Self.outputFloor)
+            }
+        }
+        .onChange(of: contentHeight) { _, height in
+            if height != nil { onResultsHeightChange(reportedHeight) }
+        }
+        .onChange(of: reportedHeight) { _, h in
+            // While an existing body is still being measured, don't let a
+            // selector/budget geometry change publish the temporary floor.
+            if contentHeight != nil || selectedTextIsEmpty {
+                onResultsHeightChange(h)
+            }
+        }
     }
 
     @ViewBuilder
@@ -48,6 +66,7 @@ struct PageModeView: View {
                 engineRun: selected,
                 original: run.lastSourceText ?? viewModel.inputText,
                 bilingual: viewModel.pageBilingual,
+                heightCeiling: outputCap,
                 onHeight: { contentHeight = $0 }
             )
         } else {
@@ -64,12 +83,20 @@ struct PageModeView: View {
         max(Self.outputFloor, viewModel.resultAreaBudget - selectorHeight)
     }
     private var outputDisplayed: CGFloat {
-        // Before the first measurement, fill the budget so long content opens at
-        // full height; once measured, grow-then-cap like the compact cards.
-        guard let h = contentHeight else { return outputCap }
-        return min(max(h, Self.outputFloor), outputCap)
+        PageModeLayout.outputHeight(
+            measured: contentHeight,
+            floor: Self.outputFloor,
+            cap: outputCap
+        )
     }
     private var reportedHeight: CGFloat { selectorHeight + outputDisplayed }
+
+    /// `fullText`, rather than `hasContent`, is authoritative here: the latter
+    /// flips before the streaming buffer's first coalesced flush, while the page
+    /// reader still contains only "翻译中…".
+    private var selectedTextIsEmpty: Bool {
+        selectedRun?.stream.fullText.isEmpty ?? true
+    }
 
     private var selectedRun: EngineRunModel? {
         let id = PageModeLayout.resolvedProvider(
@@ -110,73 +137,151 @@ struct PageModeView: View {
     }
 }
 
-/// The selected provider's output. Observes the run model so it refreshes when
-/// the translation finishes (the streaming buffer itself isn't observable, but
-/// the run's `state`/`hasContent` are, and re-render re-reads `fullText`).
+/// The selected provider's output. The AppKit reader binds directly to the
+/// streaming model: chunks append to its text storage even though SwiftUI does
+/// not re-render for every delta.
 private struct PageModeContent: View {
     @ObservedObject var engineRun: EngineRunModel
     let original: String
     let bilingual: Bool
+    let heightCeiling: CGFloat
     var onHeight: (CGFloat) -> Void
 
     var body: some View {
-        PageReaderView(attributed: attributed, resetKey: engineRun.id, onContentHeightChange: onHeight)
-    }
-
-    /// 仅译文 = translation alone; 对照 interleaves each source paragraph (muted)
-    /// with its translation (primary) by index, up to the number of paragraphs
-    /// translated so far — so it fills in top-down as the text streams instead
-    /// of flipping layout when the run completes.
-    private var attributed: NSAttributedString {
-        let translation = engineRun.stream.fullText
-        guard !translation.isEmpty else {
-            return Self.block(placeholder, color: .secondaryLabelColor, spacing: 10)
-        }
-        if !bilingual {
-            return Self.block(translation, color: .labelColor, spacing: 10)
-        }
-        let o = PageModeLayout.paragraphUnits(original)
-        let t = PageModeLayout.paragraphUnits(translation)
-        let pairs = min(o.count, t.count)
-        let out = NSMutableAttributedString()
-        guard pairs > 0 else {
-            // Nothing to pair yet (a side didn't split into paragraphs) — show
-            // source then translation as blocks.
-            out.append(Self.block(original, color: .secondaryLabelColor, spacing: 16))
-            out.append(Self.block(translation, color: .labelColor, spacing: 0))
-            return out
-        }
-        // Pair by index up to what's translated so far: interleaved from the
-        // first chunk, filling in top-down as it streams — no flip at completion.
-        for i in 0..<pairs {
-            out.append(Self.block(o[i], color: .secondaryLabelColor, spacing: 3))
-            out.append(Self.block(t[i], color: .labelColor, spacing: i < pairs - 1 ? 16 : 0))
-        }
-        return out
-    }
-
-    /// One paragraph run: `text` + trailing newline, colored, with `spacing`
-    /// points of gap after it.
-    private static func block(_ text: String, color: NSColor, spacing: CGFloat) -> NSAttributedString {
-        let para = NSMutableParagraphStyle()
-        para.lineSpacing = 4
-        para.paragraphSpacing = spacing
-        return NSAttributedString(string: text + "\n", attributes: [
-            .font: NSFont.systemFont(ofSize: 14),
-            .foregroundColor: color,
-            .paragraphStyle: para,
-        ])
+        PageReaderView(
+            model: engineRun.stream,
+            original: original,
+            bilingual: bilingual,
+            placeholder: placeholder,
+            streamSettled: streamSettled,
+            resetKey: engineRun.id,
+            heightCeiling: heightCeiling,
+            onContentHeightChange: onHeight
+        )
     }
 
     private var placeholder: String {
         if case .streaming = engineRun.state { return "翻译中…" }
         return "暂无译文"
     }
+
+    /// The run stopped streaming (done / failed / needs-download) — 对照 may
+    /// now append the original's unpaired remainder.
+    private var streamSettled: Bool {
+        if case .streaming = engineRun.state { return false }
+        return true
+    }
 }
 
 /// Pure page-mode helpers, factored out of the views so the provider-selection
 /// rule can be unit-tested without a running UI.
 enum PageModeLayout {
+    struct TextBlock: Equatable {
+        enum Role: Equatable { case source, translation, placeholder }
+        let text: String
+        let role: Role
+    }
+
+    /// Blocks rendered by the page reader. Before the first chunk only the
+    /// compact placeholder is shown. Bilingual 对照 interleaves paragraph by
+    /// paragraph (原[i], 译[i], 原[i+1], …), filling top-down as the translation
+    /// streams — the projection only ever *extends* while text appends, so the
+    /// reader can stay append-only. Nothing is truncated: translation
+    /// paragraphs beyond the original's count always show, and once the run
+    /// settles the original's unpaired remainder is appended too (an engine
+    /// that merged paragraphs can't silently drop source text).
+    static func textBlocks(
+        original: String,
+        translation: String,
+        bilingual: Bool,
+        placeholder: String,
+        settled: Bool = true
+    ) -> [TextBlock] {
+        guard !translation.isEmpty else {
+            return [TextBlock(text: placeholder, role: .placeholder)]
+        }
+        guard bilingual, !original.isEmpty else {
+            return [TextBlock(text: translation, role: .translation)]
+        }
+        var o = paragraphUnits(original)
+        var t = paragraphUnits(translation)
+        // 划词 capture frequently loses newlines (AX text of many apps comes
+        // back flat), which collapses the source to ONE paragraph unit and
+        // degenerates 对照 into "whole source, then all translation". When the
+        // source has no usable paragraph structure but does split into
+        // sentences, pair sentence-by-sentence instead.
+        if o.count <= 1 {
+            let sourceSentences = sentenceUnits(original)
+            if sourceSentences.count >= 2 {
+                o = sourceSentences
+                t = sentenceUnits(translation)
+            }
+        }
+        let pairs = Swift.min(o.count, t.count)
+        var blocks: [TextBlock] = []
+        for i in 0..<pairs {
+            blocks.append(TextBlock(text: o[i], role: .source))
+            blocks.append(TextBlock(text: t[i], role: .translation))
+        }
+        for i in pairs..<t.count {
+            blocks.append(TextBlock(text: t[i], role: .translation))
+        }
+        if settled {
+            for i in pairs..<o.count {
+                blocks.append(TextBlock(text: o[i], role: .source))
+            }
+        }
+        return blocks
+    }
+
+    /// Non-empty, trimmed lines — the paragraph units 对照 pairs by index.
+    /// Blank lines are dropped: they're only spacing, and some engines (e.g.
+    /// Apple) separate paragraphs with an extra blank line while others don't;
+    /// ignoring blanks keeps both sides in step.
+    static func paragraphUnits(_ s: String) -> [String] {
+        s.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Sentence units for flat (newline-less) text. CJK terminators always end
+    /// a sentence; Latin ones only when followed by whitespace/end, so
+    /// decimals ("1.5s") and versions ("v3.2") don't split.
+    static func sentenceUnits(_ s: String) -> [String] {
+        let cjkTerminators: Set<Character> = ["。", "！", "？", "…", "；"]
+        let latinTerminators: Set<Character> = [".", "!", "?", ";"]
+        var units: [String] = []
+        var current = ""
+        let chars = Array(s)
+        for (i, ch) in chars.enumerated() {
+            current.append(ch)
+            let isBoundary: Bool
+            if cjkTerminators.contains(ch) {
+                isBoundary = true
+            } else if latinTerminators.contains(ch) {
+                let next = i + 1 < chars.count ? chars[i + 1] : " "
+                isBoundary = next == " " || next == "\n" || next == "\t"
+            } else {
+                isBoundary = false
+            }
+            if isBoundary {
+                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { units.append(trimmed) }
+                current = ""
+            }
+        }
+        let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty { units.append(tail) }
+        return units
+    }
+
+    /// Height used by page mode before/after TextKit's first measurement. An
+    /// unmeasured loading reader must stay compact instead of borrowing the full
+    /// result budget and accidentally stretching the panel to its ceiling.
+    static func outputHeight(measured: CGFloat?, floor: CGFloat, cap: CGFloat) -> CGFloat {
+        min(max(measured ?? floor, floor), cap)
+    }
+
     /// The provider to show: the current selection if still present, else the
     /// first available, else nil (no runs).
     static func resolvedProvider(ids: [String], selected: String?) -> String? {
@@ -184,13 +289,4 @@ enum PageModeLayout {
         return ids.first
     }
 
-    /// Non-empty, trimmed lines — the paragraph units the 对照 view pairs by
-    /// index. Blank lines are dropped because they're only spacing (and some
-    /// engines, e.g. Apple, separate paragraphs with an extra blank line while
-    /// others don't; ignoring blanks keeps both sides in step).
-    static func paragraphUnits(_ s: String) -> [String] {
-        s.components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-    }
 }
