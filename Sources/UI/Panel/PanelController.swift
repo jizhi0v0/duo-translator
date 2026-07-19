@@ -34,6 +34,13 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     private var panel: TranslatorPanel!
     private var clickMonitor: Any?
+    // Suppress window re-fitting while the user is actively scrolling a result:
+    // resizing the glass panel mid-scroll (as streaming content grows) fights
+    // the scroll and drops frames. Deferred fits apply once scrolling settles.
+    private var scrollMonitor: Any?
+    private var isUserScrolling = false
+    private var pendingRefit = false
+    private var scrollIdleWork: DispatchWorkItem?
     // Timing instrumentation for the show path (first show pays lazy construction
     // + first SwiftUI/AppKit layout; later shows reuse the panel).
     private var didFirstShow = false
@@ -292,6 +299,12 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// Past the ceiling the result body scrolls internally instead of growing.
     private func refit() {
         guard panel.isVisible, !panel.inLiveResize else { return }
+        // Don't resize under the user's fingers: hold the fit and re-apply it
+        // when the scroll settles (see `noteUserScroll`).
+        if isUserScrolling {
+            pendingRefit = true
+            return
+        }
         guard let screen = panel.screen ?? NSScreen.main else { return }
 
         let visible = screen.visibleFrame
@@ -347,6 +360,12 @@ final class PanelController: NSObject, NSWindowDelegate {
                 self.close()
             }
         }
+        if scrollMonitor == nil {
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                self?.noteUserScroll()
+                return event
+            }
+        }
     }
 
     private func removeClickMonitor() {
@@ -354,6 +373,32 @@ final class PanelController: NSObject, NSWindowDelegate {
             NSEvent.removeMonitor(clickMonitor)
             self.clickMonitor = nil
         }
+        if let scrollMonitor {
+            NSEvent.removeMonitor(scrollMonitor)
+            self.scrollMonitor = nil
+        }
+        scrollIdleWork?.cancel()
+        scrollIdleWork = nil
+        isUserScrolling = false
+        pendingRefit = false
+    }
+
+    /// Mark scrolling active and (re)arm the idle timer. `refit` no-ops while
+    /// this is set; when scrolling has been quiet ~200ms, apply any fit that
+    /// was deferred so the window catches up to the content once.
+    private func noteUserScroll() {
+        isUserScrolling = true
+        scrollIdleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.isUserScrolling = false
+            if self.pendingRefit {
+                self.pendingRefit = false
+                self.refit()
+            }
+        }
+        scrollIdleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
     }
 
     // MARK: - NSWindowDelegate

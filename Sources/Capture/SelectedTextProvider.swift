@@ -53,11 +53,11 @@ enum SelectedTextProvider {
                 let copied = cleaned(await PasteboardCopyFallback.capture())
                 Log.capture.debug("划词: web-view ⌘C 复核 \(ms(cStart), privacy: .public)ms, 多行=\(copied?.contains("\n") == true, privacy: .public)")
                 if let copied, copied.contains("\n") {
-                    Log.capture.debug("划词: 完成[AX+⌘C 多行] 总 \(ms(), privacy: .public)ms, \(copied.count, privacy: .public) 字")
+                    Log.capture.debug("划词: 完成[AX+⌘C 多行] 总 \(ms(), privacy: .public)ms, \(copied.count, privacy: .public) 字, 换行\(copied.filter(\.isNewline).count, privacy: .public)")
                     return copied
                 }
             }
-            Log.capture.debug("划词: 完成[AX 直读] 总 \(ms(), privacy: .public)ms, \(text.count, privacy: .public) 字")
+            Log.capture.debug("划词: 完成[AX 直读] 总 \(ms(), privacy: .public)ms, \(text.count, privacy: .public) 字, 换行\(text.filter(\.isNewline).count, privacy: .public)")
             return text
         }
 
@@ -79,7 +79,7 @@ enum SelectedTextProvider {
                 }
             }
             if let text = pokeText {
-                Log.capture.debug("划词: 完成[AX poke 重试] 总 \(ms(), privacy: .public)ms (poke+轮询 \(ms(pokeStart), privacy: .public)ms), \(text.count, privacy: .public) 字")
+                Log.capture.debug("划词: 完成[AX poke 重试] 总 \(ms(), privacy: .public)ms (poke+轮询 \(ms(pokeStart), privacy: .public)ms), \(text.count, privacy: .public) 字, 换行\(text.filter(\.isNewline).count, privacy: .public)")
                 return text
             }
             Log.capture.debug("划词: AX poke 重试无果 \(ms(pokeStart), privacy: .public)ms")
@@ -92,7 +92,7 @@ enum SelectedTextProvider {
 
         let pbStart = Date()
         if let text = cleaned(await PasteboardCopyFallback.capture()) {
-            Log.capture.debug("划词: 完成[⌘C 兜底] 总 \(ms(), privacy: .public)ms (⌘C \(ms(pbStart), privacy: .public)ms), \(text.count, privacy: .public) 字")
+            Log.capture.debug("划词: 完成[⌘C 兜底] 总 \(ms(), privacy: .public)ms (⌘C \(ms(pbStart), privacy: .public)ms), \(text.count, privacy: .public) 字, 换行\(text.filter(\.isNewline).count, privacy: .public)")
             return text
         }
         Log.capture.debug("划词: 空,失败 总 \(ms(), privacy: .public)ms")

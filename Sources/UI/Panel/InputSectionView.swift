@@ -26,6 +26,10 @@ struct InputSectionView: View {
     /// own `.padding(6)` top+bottom plus the text-container's vertical inset.
     private static let editorVChrome: CGFloat = 22
     private static let font = Font.system(size: 13)
+    /// Line spacing, shared by the editor and its measuring mirror so the
+    /// growth height stays exact. A touch airier than the default so pasted
+    /// multi-line source doesn't read cramped.
+    private static let lineSpacing: CGFloat = 5
 
     /// Long text certainly overflows `maxEditorHeight`, so its exact height is
     /// irrelevant — the editor caps and scrolls internally either way. Skip the
@@ -43,7 +47,7 @@ struct InputSectionView: View {
         VStack(spacing: 0) {
             TextEditor(text: $viewModel.inputText)
                 .font(Self.font)
-                .lineSpacing(3)
+                .lineSpacing(Self.lineSpacing)
                 .scrollContentBackground(.hidden)
                 .padding(6)
                 .frame(height: editorHeight)
@@ -83,7 +87,7 @@ struct InputSectionView: View {
     private var heightMirror: some View {
         Text(viewModel.inputText.isEmpty ? " " : viewModel.inputText)
             .font(Self.font)
-            .lineSpacing(3)
+            .lineSpacing(Self.lineSpacing)
             .padding(.horizontal, Self.editorInset)
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .fixedSize(horizontal: false, vertical: true)

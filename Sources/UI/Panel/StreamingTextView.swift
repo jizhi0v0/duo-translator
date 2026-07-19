@@ -24,6 +24,19 @@ private final class ResultScrollView: NSScrollView {
     }
 }
 
+/// Scroll view + scroller for page mode, both opting out of window-dragging:
+/// the panel is `isMovableByWindowBackground`, so without this a drag on the
+/// scroller (a subview with its own setting) moves the whole window instead of
+/// scrolling. Overriding on the scroll view alone isn't enough — the scroller
+/// is what receives the drag.
+private final class NonDraggingScroller: NSScroller {
+    override var mouseDownCanMoveWindow: Bool { false }
+}
+
+private final class PageScrollView: NSScrollView {
+    override var mouseDownCanMoveWindow: Bool { false }
+}
+
 /// TextKit 2 backed streaming result view.
 ///
 /// Performance rules (do not break):
@@ -58,6 +71,10 @@ struct StreamingTextView: NSViewRepresentable {
         let font = NSFont.systemFont(ofSize: fontSize)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 3
+        // Gap after each paragraph (only at line breaks, not on soft wraps) so
+        // multi-paragraph translations read with breathing room instead of every
+        // line jammed together.
+        paragraph.paragraphSpacing = 8
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor.labelColor,
@@ -96,6 +113,11 @@ struct StreamingTextView: NSViewRepresentable {
         var onContentHeightChange: ((CGFloat) -> Void)?
         private var lastReportedHeight: CGFloat = 0
         private weak var model: StreamingTextModel?
+        /// Coalesces the per-chunk height reports while streaming. Measuring the
+        /// height forces a full-document layout, so doing it on every 33ms flush
+        /// is an O(n²) storm that fights scrolling for the main thread. Batch it
+        /// to ~8/sec; resets and width changes still report immediately.
+        private var heightReportScheduled = false
 
         /// One-time wiring of the views and the width observer.
         func setup(
@@ -156,7 +178,19 @@ struct StreamingTextView: NSViewRepresentable {
             // A translation is read top-down, so don't follow the stream to the
             // bottom — leave the scroll position where it is (at the top for a
             // fresh run) so the reader starts from the beginning.
-            reportHeight()
+            scheduleHeightReport()
+        }
+
+        /// Throttled height report for the streaming append path (see
+        /// `heightReportScheduled`).
+        private func scheduleHeightReport() {
+            guard !heightReportScheduled else { return }
+            heightReportScheduled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                guard let self else { return }
+                self.heightReportScheduled = false
+                self.reportHeight()
+            }
         }
 
         private func resetText() {
@@ -200,5 +234,111 @@ struct StreamingTextView: NSViewRepresentable {
         deinit {
             NotificationCenter.default.removeObserver(self)
         }
+    }
+}
+
+/// Static attributed-string reader for page mode, in a TextKit 2 `NSTextView`
+/// so scrolling only lays out the visible viewport (a SwiftUI `Text` re-measures
+/// the whole string via CoreText every display cycle — the scroll-jank source).
+///
+/// Uses a plain `NSScrollView` (not `ResultScrollView`): page mode's content is
+/// the only scroller, so it needs normal scrolling, not the card list's
+/// scroll-chaining/swallow behavior. Reports content height so the page grows
+/// then scrolls, like the cards.
+struct PageReaderView: NSViewRepresentable {
+    let attributed: NSAttributedString
+    /// Identity of the underlying run. Scroll resets to the top only when this
+    /// changes (a new translation / provider) — NOT on every streaming chunk,
+    /// which would otherwise yank the reader back to the top mid-scroll.
+    let resetKey: String
+    var onContentHeightChange: ((CGFloat) -> Void)?
+
+    func makeCoordinator() -> ReaderCoordinator { ReaderCoordinator() }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let textView = NSTextView(usingTextLayoutManager: true)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 16, height: 16)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+
+        let scrollView = PageScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.verticalScroller = NonDraggingScroller()
+        scrollView.hasHorizontalScroller = false
+        scrollView.drawsBackground = false
+        scrollView.documentView = textView
+        scrollView.contentView.postsBoundsChangedNotifications = true
+
+        context.coordinator.setup(scrollView: scrollView, textView: textView, onContentHeightChange: onContentHeightChange)
+        context.coordinator.setContent(attributed, resetKey: resetKey)
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        context.coordinator.onContentHeightChange = onContentHeightChange
+        context.coordinator.setContent(attributed, resetKey: resetKey)
+    }
+
+    @MainActor
+    final class ReaderCoordinator: NSObject {
+        private weak var textView: NSTextView?
+        private weak var scrollView: NSScrollView?
+        var onContentHeightChange: ((CGFloat) -> Void)?
+        private var lastReportedHeight: CGFloat = 0
+        private var lastString = ""
+        private var lastResetKey: String?
+
+        func setup(scrollView: NSScrollView, textView: NSTextView, onContentHeightChange: ((CGFloat) -> Void)?) {
+            self.scrollView = scrollView
+            self.textView = textView
+            self.onContentHeightChange = onContentHeightChange
+            textView.postsFrameChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(frameChanged),
+                name: NSView.frameDidChangeNotification, object: textView
+            )
+        }
+
+        @objc private func frameChanged() { reportHeight() }
+
+        /// Replace content only when the text actually changed — SwiftUI may call
+        /// `updateNSView` during unrelated re-renders, and re-setting the storage
+        /// then would re-lay-out for nothing. Scroll resets to the top only when
+        /// `resetKey` changes (new run/provider), so streaming a longer body
+        /// doesn't yank the reader back up while the user is reading/scrolling.
+        func setContent(_ attr: NSAttributedString, resetKey: String) {
+            guard let textView, let storage = textView.textStorage else { return }
+            guard attr.string != lastString || resetKey != lastResetKey else { return }
+            let isNewRun = resetKey != lastResetKey
+            lastResetKey = resetKey
+            lastString = attr.string
+            storage.setAttributedString(attr)
+            if isNewRun { textView.scroll(.zero) }
+            reportHeight()
+        }
+
+        private func reportHeight() {
+            guard let handler = onContentHeightChange, let textView,
+                  let lm = textView.textLayoutManager else { return }
+            lm.ensureLayout(for: lm.documentRange)
+            let height = lm.usageBoundsForTextContainer.height + textView.textContainerInset.height * 2
+            guard abs(height - lastReportedHeight) > 1 else { return }
+            lastReportedHeight = height
+            // Deliver next tick: `reportHeight` can run inside SwiftUI's update/
+            // layout pass (from `updateNSView` or a frame-change during layout),
+            // and mutating the caller's @State synchronously there is silently
+            // dropped — which pinned the page height at its floor (very narrow).
+            DispatchQueue.main.async { handler(height) }
+        }
+
+        deinit { NotificationCenter.default.removeObserver(self) }
     }
 }
