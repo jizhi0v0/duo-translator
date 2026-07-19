@@ -6,6 +6,9 @@ struct ResultCardView: View {
     @ObservedObject var engineRun: EngineRunModel
     @ObservedObject private var speech = SpeechService.shared
     @Binding var isCollapsed: Bool
+    /// Presentation of the per-run performance popover (LLM engines). Owned by
+    /// the view model so a page-mode switch can dismiss it before the resize.
+    @Binding var metricsPresented: Bool
     /// BCP-47 code of the run's target language, for voice selection.
     var targetLanguage: String?
     /// Ceiling for this card's stable body viewport. Passed in so the viewport
@@ -16,11 +19,33 @@ struct ResultCardView: View {
     /// Apple language-pack download, invoked from the in-card prompt.
     var onDownloadApple: (String?, String) -> Void
 
-    /// A compact, readable viewport that is reserved as soon as the card
-    /// appears. Keeping it constant is important: if it followed the streamed
-    /// text's natural height, every new line would push the cards below it and
-    /// repeatedly resize the whole panel.
-    private static let preferredBodyHeight: CGFloat = 96
+    /// Minimum viewport reserved as soon as the card appears — comfortably
+    /// fits the "翻译中…" placeholder and a first line so a fresh or short
+    /// result never looks collapsed.
+    private static let minBodyHeight: CGFloat = PanelLayout.lineAlignedBodyHeight(atMost: 44)
+
+    /// Tracks the stream's natural content height so the body grows with it;
+    /// growth is throttled (see `StreamingTextView`) and capped at
+    /// `bodyCeiling`, past which the body scrolls internally instead of
+    /// resizing the card further.
+    @State private var contentHeight: CGFloat = Self.minBodyHeight
+
+    /// `maxBodyHeight` snapped to a whole line so the body never stops
+    /// mid-line at the cap.
+    private var bodyCeiling: CGFloat {
+        PanelLayout.lineAlignedBodyHeight(atMost: maxBodyHeight)
+    }
+
+    private var displayedBodyHeight: CGFloat {
+        // While the "翻译中…" placeholder is up (a fresh or re-run translation
+        // with no body yet), stay at the compact minimum regardless of a tracked
+        // height left over from a previous result. A card is reused across runs
+        // (SwiftUI keys it by the stable engine id), so `contentHeight` @State
+        // survives into the next translation; without this the placeholder would
+        // inherit the prior result's height and open tall.
+        if isAwaitingContent { return Self.minBodyHeight }
+        return min(max(contentHeight, Self.minBodyHeight), bodyCeiling)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,8 +63,12 @@ struct ResultCardView: View {
                     }
                     // Always mounted at a stable height. Streaming changes only
                     // the text storage; it never changes the card/window layout.
-                    StreamingTextView(model: engineRun.stream)
-                        .frame(height: stableBodyHeight)
+                    StreamingTextView(
+                        model: engineRun.stream,
+                        heightCeiling: bodyCeiling,
+                        onContentHeightChange: { contentHeight = $0 }
+                    )
+                        .frame(height: displayedBodyHeight)
                         .overlay(alignment: .topLeading) {
                             if isAwaitingContent {
                                 // Match the streamed text exactly — same 14pt size and
@@ -72,6 +101,13 @@ struct ResultCardView: View {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(Color.secondary.opacity(0.18))
         )
+        // Entering the awaiting/placeholder state (a new run on a reused card)
+        // drops the leftover height so, when the first chunk lands, the body
+        // grows from the compact minimum instead of flashing the prior result's
+        // height for a frame before the stream re-measures.
+        .onChange(of: isAwaitingContent) { _, awaiting in
+            if awaiting { contentHeight = Self.minBodyHeight }
+        }
     }
 
     private var header: some View {
@@ -103,6 +139,29 @@ struct ResultCardView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+
+            // Per-run performance readout (LLM engines only): first-token
+            // latency + throughput. Click opens a compact popover; tucked right
+            // after the name so it reads as provider metadata, not an action.
+            if engineRun.kind.isLLM, let metrics = engineRun.metrics {
+                Button {
+                    metricsPresented.toggle()
+                } label: {
+                    Image(systemName: "gauge.with.dots.needle.33percent")
+                        .font(.caption)
+                        .foregroundStyle(metricsPresented ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("翻译性能")
+                .accessibilityIdentifier("result.metrics")
+                .accessibilityValue(metrics.tooltip)
+                // Publish this gauge's position (only while its readout is open)
+                // so PanelRootView can float the card right beside it.
+                .anchorPreference(key: MetricsAnchorKey.self, value: .bounds) {
+                    metricsPresented ? $0 : nil
+                }
+            }
 
             Spacer(minLength: 8)
 
@@ -142,15 +201,6 @@ struct ResultCardView: View {
     private var isAwaitingContent: Bool {
         if case .streaming = engineRun.state { return !engineRun.hasContent }
         return false
-    }
-
-    /// Snap to a whole-line height so the viewport never exposes a clipped last
-    /// line. This value depends only on the run layout, never streamed content.
-    private var stableBodyHeight: CGFloat {
-        PanelLayout.stableBodyHeight(
-            preferred: Self.preferredBodyHeight,
-            cap: maxBodyHeight
-        )
     }
 
     private func downloadBody(source: String?, target: String) -> some View {

@@ -16,6 +16,11 @@ enum EngineKind: String, Codable, CaseIterable, Sendable {
     }
 
     var needsAPIKey: Bool { self != .apple }
+
+    /// Token-streaming LLM backends. Only these produce meaningful throughput /
+    /// first-token metrics; DeepL and Apple are single-shot and are excluded
+    /// from the per-run performance readout.
+    var isLLM: Bool { self == .openAICompat || self == .anthropic }
 }
 
 struct EngineProfile: Codable, Identifiable, Hashable, Sendable {

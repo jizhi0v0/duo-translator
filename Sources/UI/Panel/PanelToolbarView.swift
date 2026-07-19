@@ -37,6 +37,20 @@ struct PanelToolbarView: View {
 
             Spacer()
 
+            // UI-test-only: re-seed the cards back to their loading placeholder,
+            // keeping the same ids so SwiftUI reuses them — the automation hook
+            // for the "reused card must reset its height on re-translate" test.
+            // Never present in a normal launch.
+            if Self.isUITest, hasResults {
+                ToolbarIconButton(
+                    systemName: "arrow.clockwise",
+                    help: "UITEST re-seed"
+                ) {
+                    viewModel.run.uiTestReseedStreaming()
+                }
+                .accessibilityIdentifier("uitest.reseedStreaming")
+            }
+
             ToolbarIconButton(
                 systemName: "xmark",
                 hoverTint: .red,
@@ -47,6 +61,8 @@ struct PanelToolbarView: View {
             .accessibilityIdentifier("toolbar.close")
         }
     }
+
+    private static let isUITest = ProcessInfo.processInfo.arguments.contains("-uiTest")
 }
 
 /// A compact, borderless circular icon button for the panel toolbar. Idle it's

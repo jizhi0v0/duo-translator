@@ -36,6 +36,7 @@ struct ResultListView: View {
                     ResultCardView(
                         engineRun: engineRun,
                         isCollapsed: viewModel.collapsedBinding(for: engineRun.id),
+                        metricsPresented: viewModel.metricsPopoverBinding(for: engineRun.id),
                         targetLanguage: run.targetLanguage,
                         maxBodyHeight: perCardMaxBody,
                         onRetry: { run.retry(runID: engineRun.id) },

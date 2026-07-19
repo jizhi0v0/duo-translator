@@ -25,6 +25,34 @@ final class PanelViewModelTests: XCTestCase {
         XCTAssertEqual(vm.pageModePresentationID, initial + 2)
     }
 
+    func testTogglePageModeDismissesMetricsOverlayAndSwitches() {
+        let vm = PanelViewModel()
+        vm.metricsRunID = "engine-1"
+
+        vm.togglePageMode()
+
+        // The metrics overlay is a plain in-window view, so switching modes just
+        // clears it and flips the mode in one synchronous step.
+        XCTAssertNil(vm.metricsRunID, "switching modes closes the metrics overlay")
+        XCTAssertTrue(vm.pageMode)
+    }
+
+    func testMetricsPopoverBindingIsScopedToOneEngine() {
+        let vm = PanelViewModel()
+        let first = vm.metricsPopoverBinding(for: "e1")
+        XCTAssertFalse(first.wrappedValue)
+
+        first.wrappedValue = true
+        XCTAssertEqual(vm.metricsRunID, "e1")
+        // Only the owning engine's binding reads true — opening one closes any
+        // other (a single popover at a time).
+        XCTAssertTrue(vm.metricsPopoverBinding(for: "e1").wrappedValue)
+        XCTAssertFalse(vm.metricsPopoverBinding(for: "e2").wrappedValue)
+
+        first.wrappedValue = false
+        XCTAssertNil(vm.metricsRunID)
+    }
+
     func testEnterDebounceCoalescesBurstToSingleRun() async {
         let vm = PanelViewModel()
         vm.debounceDelay = .milliseconds(20)
