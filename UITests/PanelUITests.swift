@@ -277,6 +277,26 @@ final class PanelUITests: XCTestCase {
                                  "panel exceeded its height ceiling (\(panelFrame.height))")
     }
 
+    // MARK: - LLM performance readout
+
+    func testMetricsButtonOpensPerformancePopover() {
+        let app = launch(seed: "measure me", results: 1)
+
+        let metrics = app.buttons["result.metrics"]
+        XCTAssertTrue(metrics.waitForExistence(timeout: 10),
+                      "the LLM performance gauge should appear on a completed run")
+
+        metrics.click()
+
+        // The popover surfaces the headline stats: a throughput number in tok/s
+        // and the first-token label. Static text is exposed to XCUITest.
+        XCTAssertTrue(waitUntil(timeout: 3) {
+            app.staticTexts["输出速度"].exists && app.staticTexts["首 Token"].exists
+        }, "clicking the gauge should open the performance popover")
+        XCTAssertTrue(app.staticTexts["总耗时"].exists,
+                      "the popover should list total time")
+    }
+
     // MARK: - Re-translation resets a reused card's height
 
     func testReTranslationResetsCardHeightToCompactPlaceholder() {

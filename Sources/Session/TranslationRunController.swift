@@ -36,6 +36,9 @@ final class EngineRunModel: ObservableObject, Identifiable {
     @Published var thinkingExpanded = false
     /// Token usage parsed from the stream, if the provider reported it.
     var usage: (prompt: Int?, completion: Int?, total: Int?)?
+    /// First-token latency + throughput, filled in when the run finishes.
+    /// Shown only for LLM engines (see `EngineKind.isLLM`).
+    @Published var metrics: RunMetrics?
 
     init(id: String, name: String, kind: EngineKind) {
         self.id = id
@@ -153,17 +156,25 @@ final class TranslationRunController: ObservableObject {
         let inputChars = request.text.count
         tasks[run.id] = Task { [weak run] in
             let started = Date()
+            // First token of any kind (content or reasoning): reasoning models
+            // emit their chain-of-thought before the translation, and that is
+            // still "time to first token" from the user's point of view.
+            var firstTokenAt: Date?
+            func markFirstToken() { if firstTokenAt == nil { firstTokenAt = Date() } }
             do {
                 for try await event in engine.translate(request) {
                     guard let run else { return }
                     switch event {
                     case .delta(let chunk):
+                        markFirstToken()
                         run.hasContent = true
                         run.stream.append(chunk)
                     case .reasoning(let chunk):
+                        markFirstToken()
                         run.hasThinking = true
                         run.thinkingStream.append(chunk)
                     case .replace(let text):
+                        markFirstToken()
                         run.hasContent = true
                         run.stream.replaceAll(text)
                     case .usage(let prompt, let completion, let total):
@@ -176,6 +187,16 @@ final class TranslationRunController: ObservableObject {
                 run.stream.finish()
                 run.thinkingStream.finish()
                 let seconds = Date().timeIntervalSince(started)
+                if run.kind.isLLM {
+                    run.metrics = RunMetrics.make(
+                        total: seconds,
+                        ttft: firstTokenAt.map { $0.timeIntervalSince(started) },
+                        outputChars: run.stream.fullText.count,
+                        promptTokens: run.usage?.prompt,
+                        completionTokens: run.usage?.completion,
+                        totalTokens: run.usage?.total
+                    )
+                }
                 Log.engine.debug("引擎[\(run.name, privacy: .public)] done \(String(format: "%.1f", seconds), privacy: .public)s, \(run.stream.fullText.count, privacy: .public) 字")
                 run.state = .done(seconds: seconds)
                 Self.record(run, source: detected, target: target,
@@ -262,6 +283,12 @@ final class TranslationRunController: ObservableObject {
                 run.stream.replaceAll(text)
                 run.stream.finish()
                 run.hasContent = true
+                // Seed a performance readout so the header gauge / popover has
+                // something deterministic to show under test.
+                run.metrics = RunMetrics.make(
+                    total: 1.2, ttft: 0.3, outputChars: text.count,
+                    promptTokens: 40, completionTokens: 120, totalTokens: 160
+                )
                 run.state = .done(seconds: 0.5)
             }
             return run

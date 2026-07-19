@@ -36,12 +36,28 @@ final class PanelViewModel: ObservableObject {
     /// their bodies to this so the total always fits the window (tall input →
     /// shorter, internally-scrolling cards) instead of overflowing off-screen.
     @Published var resultAreaBudget: CGFloat = 400
+    /// Engine id whose performance popover is open (nil = none). Lifted out of
+    /// the card's local state so a mode switch can dismiss it *before* the panel
+    /// resizes: an open popover child window otherwise fights the page-mode
+    /// width change, flashing the panel at the wrong size until a later refit.
+    @Published var metricsRunID: String?
 
     let run = TranslationRunController()
 
     func togglePageMode() {
+        // Dismiss the in-window metrics overlay (if open) as we switch modes.
+        // It's a plain SwiftUI overlay — no separate window — so this is a clean
+        // synchronous state change with nothing to race the panel resize.
+        metricsRunID = nil
         if !pageMode { pageModePresentationID &+= 1 }
         pageMode.toggle()
+    }
+
+    func metricsPopoverBinding(for engineID: String) -> Binding<Bool> {
+        Binding(
+            get: { [weak self] in self?.metricsRunID == engineID },
+            set: { [weak self] open in self?.metricsRunID = open ? engineID : nil }
+        )
     }
 
     /// Shared debounce channel for user-initiated translate triggers (Enter key
