@@ -24,6 +24,8 @@ final class CloudSync {
         SettingsStore.Keys.engineProfiles,
         SettingsStore.Keys.ocrLanguages,
         SettingsStore.Keys.ocrMergesLines,
+        SettingsStore.Keys.ocrProvider,
+        SettingsStore.Keys.ocrVisionLevel,
         // KeyboardShortcuts persists to these; applied on next launch.
         "KeyboardShortcuts_translateSelection",
         "KeyboardShortcuts_openInputWindow",

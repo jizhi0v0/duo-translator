@@ -6,58 +6,134 @@ import SwiftUI
 /// result cards in the translation panel.
 struct EngineListView: View {
     @ObservedObject var settings: SettingsStore
+    /// Which engine's detail is open, or nil for the list. We drive navigation
+    /// by hand instead of `NavigationStack`: this view is hosted inside the
+    /// settings window's tab controller, whose toolbar already owns the toolbar
+    /// area, so a `NavigationStack` back button has nowhere to render and the
+    /// user gets stuck on the detail page.
+    @State private var selectedID: UUID?
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
+        Group {
+            if let id = selectedID,
+               let index = settings.engineProfiles.firstIndex(where: { $0.id == id }) {
+                detail(index: index)
+            } else {
+                listPane
+            }
+        }
+    }
+
+    private var listPane: some View {
+        VStack(spacing: 0) {
+            if settings.engineProfiles.isEmpty {
+                emptyState
+            } else {
                 List {
                     ForEach($settings.engineProfiles) { $profile in
-                        NavigationLink(value: profile.id) {
-                            row($profile)
-                        }
-                        .contextMenu {
-                            Button("删除", role: .destructive) {
-                                remove(id: profile.id)
+                        row($profile)
+                            .contentShape(Rectangle())
+                            .onTapGesture { selectedID = profile.id }
+                            .contextMenu {
+                                Button("删除", role: .destructive) {
+                                    remove(id: profile.id)
+                                }
                             }
-                        }
                     }
                     .onMove { from, to in
                         settings.engineProfiles.move(fromOffsets: from, toOffset: to)
                     }
                 }
                 .listStyle(.inset)
+            }
 
-                Divider()
-                bottomBar
-            }
-            .navigationDestination(for: UUID.self) { id in
-                if let index = settings.engineProfiles.firstIndex(where: { $0.id == id }) {
-                    EngineProfileDetailView(profile: $settings.engineProfiles[index])
-                        .navigationTitle(settings.engineProfiles[index].name)
-                } else {
-                    Text("该引擎已被删除")
-                        .foregroundStyle(.secondary)
+            Divider()
+            bottomBar
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "engine.combustion")
+                .font(.largeTitle)
+                .foregroundStyle(.tertiary)
+            Text("还没有翻译引擎")
+                .foregroundStyle(.secondary)
+            Text("点左下角 + 添加一个引擎")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func detail(index: Int) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    selectedID = nil
+                } label: {
+                    Label("引擎", systemImage: "chevron.left")
                 }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+
+                Spacer()
+
+                Text(settings.engineProfiles[index].name)
+                    .font(.headline)
+                    .lineLimit(1)
+
+                Spacer()
+
+                Button(role: .destructive) {
+                    let id = settings.engineProfiles[index].id
+                    selectedID = nil
+                    remove(id: id)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.red)
+                .help("删除此引擎")
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            EngineProfileDetailView(profile: $settings.engineProfiles[index])
         }
     }
 
     private func row(_ profile: Binding<EngineProfile>) -> some View {
-        HStack(spacing: 10) {
-            EngineIcon(kind: profile.wrappedValue.kind, size: 18)
-                .foregroundStyle(profile.wrappedValue.enabled ? Color.accentColor : Color.secondary)
+        let p = profile.wrappedValue
+        return HStack(spacing: 10) {
+            EngineIcon(kind: p.kind, size: 18)
+                .foregroundStyle(p.enabled ? Color.accentColor : Color.secondary)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 1) {
-                Text(profile.wrappedValue.name)
-                Text(profile.wrappedValue.kind.label)
+                Text(p.name)
+                Text(p.kind.label)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+            }
+            // Warn a new user that an enabled engine won't run as configured —
+            // the default OpenAI profile ships without a key and would otherwise
+            // fail silently at translate time.
+            if p.enabled, let issue = engineConfigIssue(p) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help(issue)
             }
             Spacer()
             Toggle("", isOn: profile.enabled)
                 .toggleStyle(.switch)
                 .controlSize(.small)
                 .labelsHidden()
+            // Tap affordance now that the row isn't a NavigationLink.
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 3)
     }
@@ -73,10 +149,11 @@ struct EngineListView: View {
             }
             .menuStyle(.borderlessButton)
             .frame(width: 28)
+            .help("添加引擎")
 
             Spacer()
 
-            Text("拖动排序，顺序即翻译窗口卡片顺序；右键删除")
+            Text("点按编辑 · 拖动排序（即卡片顺序）· 右键删除")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -91,6 +168,24 @@ struct EngineListView: View {
         guard let index = settings.engineProfiles.firstIndex(where: { $0.id == id }) else { return }
         let removed = settings.engineProfiles.remove(at: index)
         KeychainStore.shared.deleteSecret(for: removed.id)
+    }
+}
+
+/// The first thing keeping this engine from running, or nil when it's ready.
+/// Shared by the list warning badge and the detail-view status line so both
+/// agree on what "configured" means.
+@MainActor
+func engineConfigIssue(_ profile: EngineProfile) -> String? {
+    switch profile.kind {
+    case .apple:
+        return nil
+    case .deepL:
+        return KeychainStore.shared.hasSecret(for: profile.id) ? nil : "未配置 API Key"
+    case .openAICompat, .anthropic:
+        if profile.baseURL.isEmpty { return "缺少 Base URL" }
+        if profile.model.isEmpty { return "缺少模型" }
+        if !KeychainStore.shared.hasSecret(for: profile.id) { return "未配置 API Key" }
+        return nil
     }
 }
 
@@ -141,6 +236,17 @@ struct EngineIcon: View {
 struct EngineProfileDetailView: View {
     @Binding var profile: EngineProfile
     @State private var apiKey = ""
+    /// The key value loaded from the keychain in `onAppear`, so `onChange` can
+    /// tell a genuine user edit from the programmatic load and not rewrite the
+    /// same secret (churning iCloud keychain) every time the pane opens.
+    @State private var loadedKey = ""
+    @State private var test: TestState = .idle
+
+    private enum TestState: Equatable {
+        case idle, running
+        case success(String)
+        case failure(String)
+    }
 
     var body: some View {
         Form {
@@ -163,7 +269,9 @@ struct EngineProfileDetailView: View {
                 Section("API Key（存储在钥匙串）") {
                     SecureField("API Key", text: $apiKey)
                         .onChange(of: apiKey) {
+                            guard apiKey != loadedKey else { return }
                             KeychainStore.shared.setSecret(apiKey, for: profile.id)
+                            loadedKey = apiKey
                         }
                 }
             }
@@ -175,10 +283,96 @@ struct EngineProfileDetailView: View {
                         .frame(minHeight: 90)
                 }
             }
+
+            testSection
         }
         .formStyle(.grouped)
         .onAppear {
-            apiKey = KeychainStore.shared.secret(for: profile.id) ?? ""
+            let existing = KeychainStore.shared.secret(for: profile.id) ?? ""
+            loadedKey = existing
+            apiKey = existing
+        }
+    }
+
+    /// Lets a new user confirm the engine actually works before relying on it,
+    /// instead of discovering a bad key or URL only at translate time. Runs one
+    /// real request through the same factory the app uses.
+    @ViewBuilder private var testSection: some View {
+        Section("连接测试") {
+            if let issue = engineConfigIssue(profile) {
+                Label(issue, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.callout)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    runTest()
+                } label: {
+                    if test == .running {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("测试连接")
+                    }
+                }
+                .disabled(test == .running)
+
+                switch test {
+                case .success:
+                    Label("连接成功", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.callout)
+                case .failure:
+                    Label("连接失败", systemImage: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                        .font(.callout)
+                case .idle, .running:
+                    EmptyView()
+                }
+            }
+
+            switch test {
+            case .success(let text):
+                Text("译文：\(text)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            case .failure(let message):
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            case .idle, .running:
+                EmptyView()
+            }
+        }
+    }
+
+    private func runTest() {
+        test = .running
+        let profile = self.profile
+        let target = SettingsStore.shared.firstLanguage
+        Task { @MainActor in
+            let engine = EngineFactory.makeEngine(profile: profile, keychain: .shared)
+            let request = TranslationRequest(
+                text: "Hello, world.",
+                sourceLanguage: "en",
+                targetLanguage: target
+            )
+            do {
+                var output = ""
+                for try await event in engine.translate(request) {
+                    switch event {
+                    case .delta(let chunk): output += chunk
+                    case .replace(let whole): output = whole
+                    case .reasoning, .usage, .done: break
+                    }
+                }
+                let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                test = trimmed.isEmpty ? .failure("引擎没有返回任何文本。") : .success(trimmed)
+            } catch {
+                test = .failure(error.localizedDescription)
+            }
         }
     }
 }

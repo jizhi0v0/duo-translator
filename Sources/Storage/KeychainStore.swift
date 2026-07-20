@@ -32,6 +32,20 @@ final class KeychainStore: @unchecked Sendable {
         return nil
     }
 
+    /// Cheap existence check for the settings UI (does an engine have a key
+    /// configured?). Omits `kSecReturnData`, so it never decrypts the value or
+    /// triggers an interactive keychain prompt.
+    func hasSecret(for id: UUID) -> Bool {
+        for synchronizable in [true, false] {
+            var query = baseQuery(account: id.uuidString, synchronizable: synchronizable)
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+            if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess {
+                return true
+            }
+        }
+        return false
+    }
+
     func setSecret(_ value: String?, for id: UUID) {
         // Pasted keys often carry a trailing newline, which would corrupt the
         // auth header rather than fail cleanly.

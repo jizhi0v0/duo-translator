@@ -83,15 +83,21 @@ struct PanelRootView: View {
         // measured height (and thus never resizes the window).
         .overlay(alignment: .bottom) {
             if let notice = viewModel.notice {
-                HStack(spacing: 6) {
+                HStack(alignment: .center, spacing: 6) {
                     Image(systemName: "info.circle")
                     Text(notice)
                         .lineLimit(2)
+                    if let action = viewModel.noticeAction {
+                        Button(action.title) { action.handler() }
+                            .buttonStyle(.borderless)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
                 .background(.thinMaterial, in: Capsule())
                 .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.15)))
                 .padding(.bottom, 12)

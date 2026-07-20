@@ -294,7 +294,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             // snaps the reused panel back to its default size (leaving a gap).
             if !autoTranslate {
                 viewModel.run.clear()
-                viewModel.notice = nil
+                viewModel.clearNotice()
             }
         }
         // Only place-and-size from scratch for a genuinely fresh panel. The
@@ -372,11 +372,12 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// the previous input and results so a failed trigger (e.g. no selection)
     /// shows a clean panel with just the notice — no stale input with an empty
     /// result area under it.
-    func showNotice(_ message: String) {
+    func showNotice(_ message: String, action: PanelNoticeAction? = nil) {
         viewModel.inputText = ""
         viewModel.run.clear()
         showInput()
         viewModel.notice = message
+        viewModel.noticeAction = action
     }
 
     /// Place the panel on whichever screen the pointer is on (falls back to the
@@ -414,7 +415,16 @@ final class PanelController: NSObject, NSWindowDelegate {
         guard let screen = panel.screen ?? NSScreen.main else { return }
 
         let visible = screen.visibleFrame
-        let ceiling = min(Self.maxHeight, visible.height - Self.screenPadding * 2)
+        // Pin the top edge. Growth is capped to the space *below* the current top,
+        // not the full screen height — otherwise a window that opened partway down
+        // the screen grows past the bottom, and the on-screen clamp below slides
+        // the whole window up, moving the "fixed" top and reading as the entire
+        // window scrolling while a provider streams. Anything past this cap scrolls
+        // inside the result cards (their budget shrinks with the ceiling), so the
+        // top never moves.
+        let topEdge = panel.frame.maxY
+        let availableBelowTop = topEdge - visible.minY - Self.screenPadding
+        let ceiling = min(Self.maxHeight, max(Self.minFittedHeight, availableBelowTop))
 
         // Publish how much height is actually left for the result list at this
         // ceiling given the current chrome. The result cards cap their bodies to

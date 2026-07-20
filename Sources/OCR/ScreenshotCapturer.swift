@@ -25,11 +25,16 @@ enum ScreenshotCapturer {
     /// Interactive region capture via the system `screencapture` tool — free
     /// crosshair UI, ESC cancels (no file is written), TCC attributes the
     /// permission to this app.
+    ///
+    /// We deliberately do NOT gate on `CGPreflightScreenCaptureAccess()`:
+    /// interactive capture is user-initiated and works even when the preflight
+    /// reads false, which it routinely does right after a grant (before an app
+    /// restart) or after the app bundle is replaced. Blocking on it stranded the
+    /// user on "需要屏幕录制权限" even after they granted it. The caller instead
+    /// surfaces the permission hint from the *recognized* result — a blank
+    /// screenshot yields no text, and only then do we point at System Settings.
     static func captureRegion() async throws -> CaptureResult {
-        guard PermissionCenter.hasScreenCapture else {
-            PermissionCenter.requestScreenCapture()
-            throw ScreenshotError.permissionNeeded
-        }
+        Log.capture.debug("OCR: 截图开始 hasScreenCapture=\(PermissionCenter.hasScreenCapture)")
 
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("duo-ocr-\(UUID().uuidString).png")
@@ -52,10 +57,19 @@ enum ScreenshotCapturer {
               (attributes[.size] as? Int ?? 0) > 0 else {
             return .cancelled // ESC pressed
         }
+        // Force a full, immediate decode. The `defer` above deletes this temp
+        // file the moment we return, and the `CGImageSource` goes out of scope
+        // too — so a lazily-decoded CGImage would read blank when Vision finally
+        // touches it (on a later detached task), silently yielding zero text.
+        // `kCGImageSourceShouldCacheImmediately` materializes the pixels now,
+        // while the file still exists.
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+              let image = CGImageSourceCreateImageAtIndex(
+                  source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+              ) else {
             throw ScreenshotError.captureFailed
         }
+        Log.capture.debug("OCR: 截图完成 \(image.width)x\(image.height)")
         return .image(image)
     }
 }

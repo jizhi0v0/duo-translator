@@ -2,6 +2,13 @@ import AppKit
 import Combine
 import SwiftUI
 
+/// An optional button attached to a panel notice. Used to turn a dead-end
+/// message (e.g. "需要屏幕录制权限") into a one-tap jump to System Settings.
+struct PanelNoticeAction {
+    let title: String
+    let handler: @MainActor () -> Void
+}
+
 @MainActor
 final class PanelViewModel: ObservableObject {
     @Published var inputText = ""
@@ -26,6 +33,9 @@ final class PanelViewModel: ObservableObject {
     @Published var focusToken = 0
     /// Transient error / hint shown under the header.
     @Published var notice: String?
+    /// Optional actionable button shown alongside `notice` — e.g. a permission
+    /// prompt that jumps straight to the relevant System Settings pane.
+    @Published var noticeAction: PanelNoticeAction?
     /// Language menu selections. Temporary (per session), never persisted.
     /// Populated from detection after an auto translate; editable by the user,
     /// applied only on `retranslate()`.
@@ -87,6 +97,13 @@ final class PanelViewModel: ObservableObject {
         )
     }
 
+    /// Clear the notice and any attached action together, so a stale button can
+    /// never outlive its message.
+    func clearNotice() {
+        notice = nil
+        noticeAction = nil
+    }
+
     /// Auto-detected translate (hotkey / OCR auto-translate). Resets the language
     /// menus to whatever detection chose. Fires immediately; cancels any pending
     /// debounced run so it can't fire a duplicate right after.
@@ -94,7 +111,7 @@ final class PanelViewModel: ObservableObject {
         debouncer.cancel()
         // Empty input: do nothing (and don't clear an existing notice).
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        notice = nil
+        clearNotice()
         startRun(text: inputText, source: nil, target: nil)
         selectedSource = run.detectedLanguage ?? ""
         selectedTarget = run.targetLanguage ?? ""
@@ -115,7 +132,7 @@ final class PanelViewModel: ObservableObject {
     func retranslate() {
         debouncer.schedule(after: debounceDelay) { [weak self] in
             guard let self else { return }
-            self.notice = nil
+            self.clearNotice()
             self.startRun(
                 text: self.inputText,
                 source: self.selectedSource.isEmpty ? nil : self.selectedSource,

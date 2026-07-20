@@ -13,6 +13,8 @@ final class SettingsStore: ObservableObject {
         static let engineProfiles = "engineProfiles"
         static let ocrLanguages = "ocrLanguages"
         static let ocrMergesLines = "ocrMergesLines"
+        static let ocrProvider = "ocrProvider"
+        static let ocrVisionLevel = "ocrVisionLevel"
     }
 
     @Published var firstLanguage: String {
@@ -42,6 +44,16 @@ final class SettingsStore: ObservableObject {
     @Published var ocrMergesLines: Bool {
         didSet { defaults.set(ocrMergesLines, forKey: Keys.ocrMergesLines) }
     }
+    /// Active OCR provider: `"apple"` for built-in Vision, or an engine profile
+    /// UUID string for a vision-capable LLM. Resolved by `OCRFactory`, which
+    /// falls back to Apple when the id no longer matches an LLM engine.
+    @Published var ocrProvider: String {
+        didSet { defaults.set(ocrProvider, forKey: Keys.ocrProvider) }
+    }
+    /// Apple Vision precision: `"accurate"` (default) or `"fast"`.
+    @Published var ocrVisionLevel: String {
+        didSet { defaults.set(ocrVisionLevel, forKey: Keys.ocrVisionLevel) }
+    }
 
     let defaults: UserDefaults
 
@@ -51,6 +63,8 @@ final class SettingsStore: ObservableObject {
         secondLanguage = defaults.string(forKey: Keys.secondLanguage) ?? "en"
         ocrLanguages = defaults.stringArray(forKey: Keys.ocrLanguages) ?? ["zh-Hans", "zh-Hant", "en-US", "ja"]
         ocrMergesLines = defaults.object(forKey: Keys.ocrMergesLines) as? Bool ?? true
+        ocrProvider = defaults.string(forKey: Keys.ocrProvider) ?? "apple"
+        ocrVisionLevel = defaults.string(forKey: Keys.ocrVisionLevel) ?? "accurate"
 
         if let data = defaults.data(forKey: Keys.engineProfiles),
            let profiles = try? JSONDecoder().decode([EngineProfile].self, from: data) {
@@ -72,6 +86,8 @@ final class SettingsStore: ObservableObject {
         secondLanguage = defaults.string(forKey: Keys.secondLanguage) ?? secondLanguage
         ocrLanguages = defaults.stringArray(forKey: Keys.ocrLanguages) ?? ocrLanguages
         ocrMergesLines = defaults.object(forKey: Keys.ocrMergesLines) as? Bool ?? ocrMergesLines
+        ocrProvider = defaults.string(forKey: Keys.ocrProvider) ?? ocrProvider
+        ocrVisionLevel = defaults.string(forKey: Keys.ocrVisionLevel) ?? ocrVisionLevel
         if let data = defaults.data(forKey: Keys.engineProfiles),
            let profiles = try? JSONDecoder().decode([EngineProfile].self, from: data) {
             engineProfiles = profiles
