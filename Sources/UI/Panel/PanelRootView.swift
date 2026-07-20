@@ -70,6 +70,12 @@ struct PanelRootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .frame(minWidth: 304, minHeight: 220)
+        // Float the LLM metrics card next to whichever header gauge is active.
+        // An in-window overlay (not a `.popover`) so opening/closing it never
+        // spins up a separate window that would race the page-mode resize.
+        .overlayPreferenceValue(MetricsAnchorKey.self) { anchor in
+            metricsOverlay(anchor)
+        }
         .onChange(of: viewModel.pageMode) { _, isPage in onModeChange(isPage) }
         .background(AppleTranslationHostView())
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
@@ -77,19 +83,49 @@ struct PanelRootView: View {
         // measured height (and thus never resizes the window).
         .overlay(alignment: .bottom) {
             if let notice = viewModel.notice {
-                HStack(spacing: 6) {
+                HStack(alignment: .center, spacing: 6) {
                     Image(systemName: "info.circle")
                     Text(notice)
                         .lineLimit(2)
+                    if let action = viewModel.noticeAction {
+                        Button(action.title) { action.handler() }
+                            .buttonStyle(.borderless)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
                 .background(.thinMaterial, in: Capsule())
                 .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.15)))
                 .padding(.bottom, 12)
                 .transition(.opacity)
+            }
+        }
+    }
+
+    /// The floating metrics card, positioned just below the active gauge and
+    /// clamped within the panel, over a transparent tap-catcher that dismisses.
+    @ViewBuilder
+    private func metricsOverlay(_ anchor: Anchor<CGRect>?) -> some View {
+        if let anchor,
+           let runID = viewModel.metricsRunID,
+           let engineRun = run.runs.first(where: { $0.id == runID }),
+           let metrics = engineRun.metrics {
+            GeometryReader { proxy in
+                let gauge = proxy[anchor]
+                let cardWidth: CGFloat = 240
+                let x = min(max(8, gauge.minX), max(8, proxy.size.width - cardWidth - 8))
+                ZStack(alignment: .topLeading) {
+                    // Tap anywhere off the card to dismiss.
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { viewModel.metricsRunID = nil }
+                    MetricsPopover(metrics: metrics, engineName: engineRun.name, kind: engineRun.kind)
+                        .offset(x: x, y: gauge.maxY + 6)
+                }
             }
         }
     }

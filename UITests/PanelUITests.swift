@@ -442,4 +442,54 @@ final class PanelUITests: XCTestCase {
         event.location = CGPoint(x: frame.midX, y: frame.midY)
         event.post(tap: .cghidEventTap)
     }
+
+    // MARK: - LLM performance readout
+
+    func testMetricsButtonOpensPerformancePopover() {
+        let app = launch(seed: "measure me", results: 1)
+
+        let metrics = app.buttons["result.metrics"]
+        XCTAssertTrue(metrics.waitForExistence(timeout: 10),
+                      "the LLM performance gauge should appear on a completed run")
+
+        metrics.click()
+
+        // The popover surfaces the headline stats: a throughput number in tok/s
+        // and the first-token label. Static text is exposed to XCUITest.
+        XCTAssertTrue(waitUntil(timeout: 3) {
+            app.staticTexts["输出速度"].exists && app.staticTexts["首 Token"].exists
+        }, "clicking the gauge should open the performance popover")
+        XCTAssertTrue(app.staticTexts["总耗时"].exists,
+                      "the popover should list total time")
+    }
+
+    // MARK: - Re-translation resets a reused card's height
+
+    func testReTranslationResetsCardHeightToCompactPlaceholder() {
+        // A card is keyed by its (stable) engine id, so SwiftUI reuses the same
+        // card view across translations and its tracked body-height @State
+        // survives. The regression: after a long result, starting a new
+        // translation showed the "翻译中…" placeholder still at the previous
+        // result's tall height. The placeholder must open compact.
+        let longResult = String(
+            repeating: "重复翻译前的长译文，占满卡片并把面板撑到接近上限。", count: 40)
+        let app = launch(seed: "source text", results: 1, resultText: longResult)
+
+        // The single long result grows the card (and panel) tall.
+        XCTAssertTrue(waitUntil(timeout: 5) { self.panel(app).frame.height > 500 },
+                      "a long completed result should grow the panel tall (was \(panel(app).frame.height))")
+        let tallHeight = panel(app).frame.height
+
+        // Re-seed to the loading placeholder on the SAME card id (a re-translate).
+        let reseed = app.buttons["uitest.reseedStreaming"]
+        XCTAssertTrue(reseed.waitForExistence(timeout: 5))
+        reseed.click()
+
+        // The reused card must collapse back to the compact placeholder height,
+        // not keep the prior result's tall height.
+        XCTAssertTrue(waitUntil(timeout: 5) { self.panel(app).frame.height < tallHeight - 150 },
+                      "re-translation left the placeholder at the previous result's height (still \(panel(app).frame.height), was \(tallHeight))")
+        XCTAssertLessThan(panel(app).frame.height, 360,
+                          "the loading placeholder card should be compact (panel \(panel(app).frame.height))")
+    }
 }

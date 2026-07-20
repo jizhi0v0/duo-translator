@@ -283,7 +283,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             // snaps the reused panel back to its default size (leaving a gap).
             if !autoTranslate {
                 viewModel.run.clear()
-                viewModel.notice = nil
+                viewModel.clearNotice()
             }
         }
         // Only place-and-size from scratch for a genuinely fresh panel. The
@@ -361,11 +361,12 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// the previous input and results so a failed trigger (e.g. no selection)
     /// shows a clean panel with just the notice — no stale input with an empty
     /// result area under it.
-    func showNotice(_ message: String) {
+    func showNotice(_ message: String, action: PanelNoticeAction? = nil) {
         viewModel.inputText = ""
         viewModel.run.clear()
         showInput()
         viewModel.notice = message
+        viewModel.noticeAction = action
     }
 
     /// Place the panel on whichever screen the pointer is on (falls back to the

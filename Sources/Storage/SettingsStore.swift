@@ -15,6 +15,8 @@ final class SettingsStore: ObservableObject {
         static let ocrMergesLines = "ocrMergesLines"
         static let resultBodyHeight = "resultBodyHeight"
         static let resultBodyHeightByEngine = "resultBodyHeightByEngine"
+        static let ocrProvider = "ocrProvider"
+        static let ocrVisionLevel = "ocrVisionLevel"
     }
 
     @Published var firstLanguage: String {
@@ -53,6 +55,16 @@ final class SettingsStore: ObservableObject {
     @Published var resultBodyHeightByEngine: [String: Double] {
         didSet { defaults.set(resultBodyHeightByEngine, forKey: Keys.resultBodyHeightByEngine) }
     }
+    /// Active OCR provider: `"apple"` for built-in Vision, or an engine profile
+    /// UUID string for a vision-capable LLM. Resolved by `OCRFactory`, which
+    /// falls back to Apple when the id no longer matches an LLM engine.
+    @Published var ocrProvider: String {
+        didSet { defaults.set(ocrProvider, forKey: Keys.ocrProvider) }
+    }
+    /// Apple Vision precision: `"accurate"` (default) or `"fast"`.
+    @Published var ocrVisionLevel: String {
+        didSet { defaults.set(ocrVisionLevel, forKey: Keys.ocrVisionLevel) }
+    }
 
     let defaults: UserDefaults
 
@@ -65,6 +77,8 @@ final class SettingsStore: ObservableObject {
         resultBodyHeight = defaults.double(forKey: Keys.resultBodyHeight)
         resultBodyHeightByEngine =
             defaults.dictionary(forKey: Keys.resultBodyHeightByEngine) as? [String: Double] ?? [:]
+        ocrProvider = defaults.string(forKey: Keys.ocrProvider) ?? "apple"
+        ocrVisionLevel = defaults.string(forKey: Keys.ocrVisionLevel) ?? "accurate"
 
         if let data = defaults.data(forKey: Keys.engineProfiles),
            let profiles = try? JSONDecoder().decode([EngineProfile].self, from: data) {
@@ -90,6 +104,8 @@ final class SettingsStore: ObservableObject {
         resultBodyHeightByEngine =
             defaults.dictionary(forKey: Keys.resultBodyHeightByEngine) as? [String: Double]
             ?? resultBodyHeightByEngine
+        ocrProvider = defaults.string(forKey: Keys.ocrProvider) ?? ocrProvider
+        ocrVisionLevel = defaults.string(forKey: Keys.ocrVisionLevel) ?? ocrVisionLevel
         if let data = defaults.data(forKey: Keys.engineProfiles),
            let profiles = try? JSONDecoder().decode([EngineProfile].self, from: data) {
             engineProfiles = profiles

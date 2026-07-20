@@ -37,6 +37,8 @@ final class SettingsWindowController: NSWindowController {
 
         addPane(GeneralSettingsView(settings: settings),
                 label: "通用", symbol: "gearshape", size: NSSize(width: 620, height: 280))
+        addPane(PermissionSettingsView(),
+                label: "权限", symbol: "lock.shield", size: NSSize(width: 620, height: 320))
         addPane(EngineListView(settings: settings),
                 label: "引擎", symbol: "engine.combustion", size: NSSize(width: 620, height: 460))
         addPane(OCRSettingsView(settings: settings),

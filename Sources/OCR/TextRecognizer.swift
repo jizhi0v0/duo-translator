@@ -3,14 +3,19 @@ import Vision
 
 enum TextRecognizer {
     /// OCR the image and merge line observations into readable text.
+    ///
+    /// `level` trades accuracy for speed: `.accurate` (default) runs the neural
+    /// path with language correction; `.fast` skips both for a quicker, rougher
+    /// pass. Language correction is only meaningful in accurate mode.
     static func recognize(
         _ image: CGImage,
         languages: [String],
-        mergeParagraphs: Bool
+        mergeParagraphs: Bool,
+        level: VNRequestTextRecognitionLevel = .accurate
     ) async throws -> String {
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
+        request.recognitionLevel = level
+        request.usesLanguageCorrection = (level == .accurate)
         request.automaticallyDetectsLanguage = true
         request.recognitionLanguages = languages
 
@@ -18,6 +23,7 @@ enum TextRecognizer {
         return try await Task.detached(priority: .userInitiated) {
             try handler.perform([request])
             let observations = request.results ?? []
+            Log.ocr.debug("Vision: observations=\(observations.count)")
             return merge(observations, mergeParagraphs: mergeParagraphs)
         }.value
     }

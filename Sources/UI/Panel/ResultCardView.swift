@@ -6,6 +6,9 @@ struct ResultCardView: View {
     @ObservedObject var engineRun: EngineRunModel
     @ObservedObject private var speech = SpeechService.shared
     @Binding var isCollapsed: Bool
+    /// Presentation of the per-run performance popover (LLM engines). Owned by
+    /// the view model so a page-mode switch can dismiss it before the resize.
+    @Binding var metricsPresented: Bool
     /// BCP-47 code of the run's target language, for voice selection.
     var targetLanguage: String?
     /// Ceiling for this card's body. Passed in so the viewport shrinks when
@@ -91,6 +94,14 @@ struct ResultCardView: View {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(Color.secondary.opacity(0.18))
         )
+        // Entering the awaiting/placeholder state (a new run on a reused card)
+        // drops the leftover height so, when the first chunk lands, the body
+        // grows from the compact minimum instead of flashing the prior result's
+        // height for a frame before the stream re-measures. The text view also
+        // re-measures on reset; this just makes the reused-card case explicit.
+        .onChange(of: isAwaitingContent) { _, awaiting in
+            if awaiting { measuredBodyHeight = nil }
+        }
     }
 
     private var header: some View {
@@ -122,6 +133,29 @@ struct ResultCardView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+
+            // Per-run performance readout (LLM engines only): first-token
+            // latency + throughput. Click opens a compact popover; tucked right
+            // after the name so it reads as provider metadata, not an action.
+            if engineRun.kind.isLLM, let metrics = engineRun.metrics {
+                Button {
+                    metricsPresented.toggle()
+                } label: {
+                    Image(systemName: "gauge.with.dots.needle.33percent")
+                        .font(.caption)
+                        .foregroundStyle(metricsPresented ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("翻译性能")
+                .accessibilityIdentifier("result.metrics")
+                .accessibilityValue(metrics.tooltip)
+                // Publish this gauge's position (only while its readout is open)
+                // so PanelRootView can float the card right beside it.
+                .anchorPreference(key: MetricsAnchorKey.self, value: .bounds) {
+                    metricsPresented ? $0 : nil
+                }
+            }
 
             Spacer(minLength: 8)
 

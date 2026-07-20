@@ -2,6 +2,13 @@ import AppKit
 import Combine
 import SwiftUI
 
+/// An optional button attached to a panel notice. Used to turn a dead-end
+/// message (e.g. "需要屏幕录制权限") into a one-tap jump to System Settings.
+struct PanelNoticeAction {
+    let title: String
+    let handler: @MainActor () -> Void
+}
+
 @MainActor
 final class PanelViewModel: ObservableObject {
     @Published var inputText = ""
@@ -26,6 +33,9 @@ final class PanelViewModel: ObservableObject {
     @Published var focusToken = 0
     /// Transient error / hint shown under the header.
     @Published var notice: String?
+    /// Optional actionable button shown alongside `notice` — e.g. a permission
+    /// prompt that jumps straight to the relevant System Settings pane.
+    @Published var noticeAction: PanelNoticeAction?
     /// Language menu selections. Temporary (per session), never persisted.
     /// Populated from detection after an auto translate; editable by the user,
     /// applied only on `retranslate()`.
@@ -36,12 +46,28 @@ final class PanelViewModel: ObservableObject {
     /// their bodies to this so the total always fits the window (tall input →
     /// shorter, internally-scrolling cards) instead of overflowing off-screen.
     @Published var resultAreaBudget: CGFloat = 400
+    /// Engine id whose performance popover is open (nil = none). Lifted out of
+    /// the card's local state so a mode switch can dismiss it *before* the panel
+    /// resizes: an open popover child window otherwise fights the page-mode
+    /// width change, flashing the panel at the wrong size until a later refit.
+    @Published var metricsRunID: String?
 
     let run = TranslationRunController()
 
     func togglePageMode() {
+        // Dismiss the in-window metrics overlay (if open) as we switch modes.
+        // It's a plain SwiftUI overlay — no separate window — so this is a clean
+        // synchronous state change with nothing to race the panel resize.
+        metricsRunID = nil
         if !pageMode { pageModePresentationID &+= 1 }
         pageMode.toggle()
+    }
+
+    func metricsPopoverBinding(for engineID: String) -> Binding<Bool> {
+        Binding(
+            get: { [weak self] in self?.metricsRunID == engineID },
+            set: { [weak self] open in self?.metricsRunID = open ? engineID : nil }
+        )
     }
 
     /// Shared debounce channel for user-initiated translate triggers (Enter key
@@ -71,6 +97,13 @@ final class PanelViewModel: ObservableObject {
         )
     }
 
+    /// Clear the notice and any attached action together, so a stale button can
+    /// never outlive its message.
+    func clearNotice() {
+        notice = nil
+        noticeAction = nil
+    }
+
     /// Auto-detected translate (hotkey / OCR auto-translate). Resets the language
     /// menus to whatever detection chose. Fires immediately; cancels any pending
     /// debounced run so it can't fire a duplicate right after.
@@ -78,7 +111,7 @@ final class PanelViewModel: ObservableObject {
         debouncer.cancel()
         // Empty input: do nothing (and don't clear an existing notice).
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        notice = nil
+        clearNotice()
         startRun(text: inputText, source: nil, target: nil)
         selectedSource = run.detectedLanguage ?? ""
         selectedTarget = run.targetLanguage ?? ""
@@ -99,7 +132,7 @@ final class PanelViewModel: ObservableObject {
     func retranslate() {
         debouncer.schedule(after: debounceDelay) { [weak self] in
             guard let self else { return }
-            self.notice = nil
+            self.clearNotice()
             self.startRun(
                 text: self.inputText,
                 source: self.selectedSource.isEmpty ? nil : self.selectedSource,

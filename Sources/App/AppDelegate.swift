@@ -106,6 +106,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.coordinator.debugClosePanel()
             }
         }
+        // Run an LLM vision OCR pass on a synthetic sample image (object =
+        // optional model override, e.g. "gpt-4o"); result/error goes to the log.
+        center.addObserver(
+            forName: Notification.Name("dev.bobby.duo.debug.ocrTest"),
+            object: nil, queue: .main
+        ) { [weak self] note in
+            let model = (note.object as? String).flatMap { $0.isEmpty ? nil : $0 }
+            Task { @MainActor in
+                await self?.coordinator.debugOCRTest(model: model)
+            }
+        }
         center.addObserver(
             forName: Notification.Name("dev.bobby.duo.debug.dumpState"),
             object: nil, queue: .main
