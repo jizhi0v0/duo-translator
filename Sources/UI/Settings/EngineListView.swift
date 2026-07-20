@@ -189,6 +189,17 @@ func engineConfigIssue(_ profile: EngineProfile) -> String? {
     }
 }
 
+/// Numeric entry for a per-million-token price. Empty reads as 0, i.e. unknown.
+private struct PriceField: View {
+    @Binding var value: Double
+
+    var body: some View {
+        TextField("0", value: $value, format: .number.precision(.fractionLength(0...4)))
+            .multilineTextAlignment(.trailing)
+            .frame(width: 90)
+    }
+}
+
 extension EngineKind {
     /// Bundled monochrome brand logo (Media.xcassets, template-rendered), or nil
     /// to fall back to `symbolName`. Apple uses its official SF Symbol glyph, so
@@ -262,6 +273,24 @@ struct EngineProfileDetailView: View {
                         .autocorrectionDisabled()
                     TextField("模型", text: $profile.model)
                         .autocorrectionDisabled()
+                }
+            }
+
+            if profile.kind.isLLM {
+                // Prices are per model and change often, so they are entered
+                // rather than baked in: a stale built-in table would report
+                // confident, wrong costs. Left at 0, the readout simply omits
+                // cost instead of inventing one.
+                Section("价格（每百万 Token，留空则不显示成本）") {
+                    LabeledContent("输入") {
+                        PriceField(value: $profile.inputPricePerMTok)
+                    }
+                    LabeledContent("输出") {
+                        PriceField(value: $profile.outputPricePerMTok)
+                    }
+                    LabeledContent("缓存输入") {
+                        PriceField(value: $profile.cachedInputPricePerMTok)
+                    }
                 }
             }
 
@@ -365,7 +394,7 @@ struct EngineProfileDetailView: View {
                     switch event {
                     case .delta(let chunk): output += chunk
                     case .replace(let whole): output = whole
-                    case .reasoning, .usage, .done: break
+                    case .reasoning, .usage, .model, .network, .done: break
                     }
                 }
                 let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -123,7 +123,12 @@ struct PanelRootView: View {
                     Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture { viewModel.metricsRunID = nil }
-                    MetricsPopover(metrics: metrics, engineName: engineRun.name, kind: engineRun.kind)
+                    MetricsPopover(
+                        metrics: metrics,
+                        engineName: engineRun.name,
+                        kind: engineRun.kind,
+                        requestedModel: engineRun.requestedModel
+                    )
                         .offset(x: x, y: gauge.maxY + 6)
                 }
             }

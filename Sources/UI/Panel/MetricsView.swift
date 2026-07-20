@@ -22,6 +22,9 @@ struct MetricsPopover: View {
     let metrics: RunMetrics
     let engineName: String
     let kind: EngineKind
+    /// Model the profile asked for, so a provider that routed elsewhere can be
+    /// called out. Empty for engines without a configurable model.
+    var requestedModel: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -55,6 +58,27 @@ struct MetricsPopover: View {
                 }
                 if metrics.completionTokens == nil {
                     DetailRow(label: "输出", value: "\(metrics.outputChars) 字")
+                }
+                if let cost = metrics.costDisplay {
+                    DetailRow(label: "成本", value: cost)
+                }
+                // The rest only appear when they have something to say: a
+                // reasoning model, a cache hit, a stall, a re-route. On an
+                // ordinary run the card stays as short as it was.
+                if let reasoning = metrics.reasoningDisplay {
+                    DetailRow(label: "思考 Token", value: reasoning)
+                }
+                if let cache = metrics.cacheDisplay {
+                    DetailRow(label: "缓存命中", value: cache)
+                }
+                if let network = metrics.networkDisplay {
+                    DetailRow(label: "连接", value: network)
+                }
+                if let stall = metrics.stallDisplay {
+                    DetailRow(label: "流式", value: stall)
+                }
+                if let routed = metrics.routedModelDisplay(requested: requestedModel) {
+                    DetailRow(label: "实际模型", value: routed)
                 }
             }
         }

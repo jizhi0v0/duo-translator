@@ -23,6 +23,13 @@ struct TranslationRecord: Codable, Identifiable, Sendable {
     let totalTokens: Int?
     let durationSeconds: Double
     let status: RecordStatus
+    /// Request start → first token, for latency trends per engine.
+    var ttftSeconds: Double?
+    /// Cost at the prices configured when the run happened. Stored rather than
+    /// derived so later price edits don't rewrite history.
+    var cost: Double?
+    /// Prompt tokens served from cache, for a cache-effectiveness view.
+    var cachedPromptTokens: Int?
 }
 
 /// Persists translation metadata for the stats window. Backed by a JSON file in

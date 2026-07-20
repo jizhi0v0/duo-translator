@@ -20,8 +20,13 @@ struct AnthropicEngine: TranslationEngine {
             let task = Task {
                 var inputTokens: Int?
                 var outputTokens: Int?
+                var cacheRead: Int?
+                var cacheWrite: Int?
                 do {
-                    for try await event in SSEClient.events(for: urlRequest) {
+                    for try await event in SSEClient.events(
+                        for: urlRequest,
+                        onTiming: { continuation.yield(.network($0)) }
+                    ) {
                         guard let data = event.data.data(using: .utf8),
                               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                             continue
@@ -43,9 +48,19 @@ struct AnthropicEngine: TranslationEngine {
                                 }
                             }
                         case "message_start":
-                            if let message = obj["message"] as? [String: Any],
-                               let usage = message["usage"] as? [String: Any] {
-                                inputTokens = usage["input_tokens"] as? Int
+                            if let message = obj["message"] as? [String: Any] {
+                                // The model the request was actually routed to.
+                                if let model = message["model"] as? String, !model.isEmpty {
+                                    continuation.yield(.model(model))
+                                }
+                                if let usage = message["usage"] as? [String: Any] {
+                                    inputTokens = usage["input_tokens"] as? Int
+                                    // Cache reads are billed at a tenth, writes
+                                    // at 1.25x, so they are separate from the
+                                    // plain input count rather than part of it.
+                                    cacheRead = usage["cache_read_input_tokens"] as? Int
+                                    cacheWrite = usage["cache_creation_input_tokens"] as? Int
+                                }
                             }
                         case "message_delta":
                             // Cumulative output token count lives at the event
@@ -62,7 +77,13 @@ struct AnthropicEngine: TranslationEngine {
                     }
                     if inputTokens != nil || outputTokens != nil {
                         let total = (inputTokens ?? 0) + (outputTokens ?? 0)
-                        continuation.yield(.usage(prompt: inputTokens, completion: outputTokens, total: total))
+                        continuation.yield(.usage(TokenUsage(
+                            prompt: inputTokens,
+                            completion: outputTokens,
+                            total: total,
+                            cachedPrompt: cacheRead,
+                            cacheWrite: cacheWrite
+                        )))
                     }
                     continuation.yield(.done)
                     continuation.finish()

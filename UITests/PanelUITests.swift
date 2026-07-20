@@ -401,6 +401,24 @@ final class PanelUITests: XCTestCase {
         )
     }
 
+    /// The performance readout shows what the run reported. Its data path is
+    /// easy to lose silently — the OpenAI dialect returns no token usage unless
+    /// the request opts in, and without tokens the cost, cache and reasoning
+    /// rows all vanish while the popover still looks fine.
+    func testMetricsReadoutShowsWhatTheRunReported() {
+        let app = launch(seed: "metrics", results: 1)
+        let gauge = app.buttons.matching(identifier: "result.metrics").firstMatch
+        XCTAssertTrue(gauge.waitForExistence(timeout: 10), "no metrics gauge in the card header")
+        gauge.click()
+
+        for label in ["总耗时", "Token", "成本", "思考 Token", "缓存命中", "连接", "流式", "实际模型"] {
+            XCTAssertTrue(
+                app.staticTexts[label].waitForExistence(timeout: 3),
+                "the readout is missing its \(label) row"
+            )
+        }
+    }
+
     /// Press, move in steps, release — as real HID events, since SwiftUI gestures
     /// never see `XCUIElement`'s synthesized ones.
     private func dragVertically(from start: CGPoint, by dy: CGFloat) {
