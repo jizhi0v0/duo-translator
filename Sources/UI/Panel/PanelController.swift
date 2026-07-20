@@ -48,13 +48,6 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     private var panel: TranslatorPanel!
     private var clickMonitor: Any?
-    // Suppress window re-fitting while the user is actively scrolling a result:
-    // resizing the glass panel mid-scroll (as streaming content grows) fights
-    // the scroll and drops frames. Deferred fits apply once scrolling settles.
-    private var scrollMonitor: Any?
-    private var isUserScrolling = false
-    private var pendingRefit = false
-    private var scrollIdleWork: DispatchWorkItem?
     // Timing instrumentation for the show path (first show pays lazy construction
     // + first SwiftUI/AppKit layout; later shows reuse the panel).
     private var didFirstShow = false
@@ -86,15 +79,15 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// Initial estimate for the chrome above the result list; replaced by a
     /// live measurement once the view lays out.
     private static let chromeHeight: CGFloat = 240
-    private static let defaultSize = NSSize(width: 400, height: 360)
+    private static let defaultSize = NSSize(width: 480, height: 360)
     /// Wider width used in page mode so the bilingual two-column view has room.
     private static let pageModeWidth: CGFloat = 680
     /// Floor for content-driven fit. Kept low so the empty / no-result state
     /// pulls in tight instead of leaving a blank block under the placeholder.
     private static let minFittedHeight: CGFloat = 220
     /// Hard ceiling for content-driven growth (input, card count, expanded
-    /// thinking, and page mode). Compact result bodies themselves use stable
-    /// viewports and scroll internally instead of resizing while streaming.
+    /// thinking, and page mode). Past it the result bodies scroll internally
+    /// instead of growing further.
     private static let maxHeight: CGFloat = 820
     /// Margin kept above and below the panel when it fills a tall screen.
     private static let screenPadding: CGFloat = 24
@@ -405,12 +398,6 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// Past the ceiling the result body scrolls internally instead of growing.
     private func refit(display: Bool = true) {
         guard panel.isVisible, !panel.inLiveResize else { return }
-        // Don't resize under the user's fingers: hold the fit and re-apply it
-        // when the scroll settles (see `noteUserScroll`).
-        if isUserScrolling {
-            pendingRefit = true
-            return
-        }
         guard let screen = panel.screen ?? NSScreen.main else { return }
 
         let visible = screen.visibleFrame
@@ -437,8 +424,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         ) else { return }
 
         // Fit chrome + result (+ a small buffer so a hair-short measurement can't
-        // clip the last card), clamped to [minFittedHeight, ceiling]. Compact
-        // cards report a stable height while their text streams.
+        // clip the last card), clamped to [minFittedHeight, ceiling].
         let desired = PanelLayout.windowHeight(
             chrome: chromeHeightMeasured,
             result: resultHeightMeasured,
@@ -477,12 +463,6 @@ final class PanelController: NSObject, NSWindowDelegate {
                 self.close()
             }
         }
-        if scrollMonitor == nil {
-            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                self?.noteUserScroll()
-                return event
-            }
-        }
     }
 
     private func removeClickMonitor() {
@@ -490,32 +470,6 @@ final class PanelController: NSObject, NSWindowDelegate {
             NSEvent.removeMonitor(clickMonitor)
             self.clickMonitor = nil
         }
-        if let scrollMonitor {
-            NSEvent.removeMonitor(scrollMonitor)
-            self.scrollMonitor = nil
-        }
-        scrollIdleWork?.cancel()
-        scrollIdleWork = nil
-        isUserScrolling = false
-        pendingRefit = false
-    }
-
-    /// Mark scrolling active and (re)arm the idle timer. `refit` no-ops while
-    /// this is set; when scrolling has been quiet ~200ms, apply any fit that
-    /// was deferred so the window catches up to the content once.
-    private func noteUserScroll() {
-        isUserScrolling = true
-        scrollIdleWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.isUserScrolling = false
-            if self.pendingRefit {
-                self.pendingRefit = false
-                self.refit()
-            }
-        }
-        scrollIdleWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
     }
 
     // MARK: - NSWindowDelegate
@@ -566,8 +520,9 @@ enum PanelLayout {
     }
 
     // Result body text metrics, mirroring `StreamingTextView` (system font 14,
-    // line spacing 3, 8pt vertical text-container inset each side).
-    static let bodyLineSpacing: CGFloat = 3
+    // 8pt vertical text-container inset each side). `StreamingTextView` reads
+    // the line spacing from here so the two can't drift apart.
+    static let bodyLineSpacing: CGFloat = 5
     static let bodyVInset: CGFloat = 8
     static let bodyLineHeight = NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: 14))
 

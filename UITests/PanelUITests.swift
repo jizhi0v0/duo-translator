@@ -104,12 +104,12 @@ final class PanelUITests: XCTestCase {
         XCTAssertTrue(app.buttons["input.speak"].exists)
     }
 
-    // MARK: - Width (2/3 → 400pt)
+    // MARK: - Width
 
-    func testPanelWidthIsAboutFourHundred() {
+    func testPanelWidthIsAboutFourEighty() {
         let app = launch(seed: "hi")
-        XCTAssertEqual(panel(app).frame.width, 400, accuracy: 8,
-                       "panel width should be ~400pt (was \(panel(app).frame.width))")
+        XCTAssertEqual(panel(app).frame.width, 480, accuracy: 8,
+                       "panel width should be ~480pt (was \(panel(app).frame.width))")
     }
 
     func testPageModeSwitchesWidthAndReturnsToCompactLayout() {
@@ -124,10 +124,10 @@ final class PanelUITests: XCTestCase {
                       "the long completed result never fitted to page height")
         let firstPageHeight = panel(app).frame.height
         XCTAssertGreaterThan(panel(app).frame.height, 0)
-        XCTAssertLessThanOrEqual(panel(app).frame.height, 761)
+        XCTAssertLessThanOrEqual(panel(app).frame.height, 821)
 
         pageMode.click()
-        XCTAssertTrue(waitUntil(timeout: 3) { abs(self.panel(app).frame.width - 400) < 8 },
+        XCTAssertTrue(waitUntil(timeout: 3) { abs(self.panel(app).frame.width - 480) < 8 },
                       "compact mode never restored its layout")
         XCTAssertGreaterThan(panel(app).frame.height, 0)
 
@@ -273,7 +273,74 @@ final class PanelUITests: XCTestCase {
         }
 
         // The panel itself stays bounded by the growth ceiling.
-        XCTAssertLessThanOrEqual(panelFrame.height, 760 + 1,
+        XCTAssertLessThanOrEqual(panelFrame.height, 820 + 1,
                                  "panel exceeded its height ceiling (\(panelFrame.height))")
+    }
+
+    /// A card's body follows its streamed text: it starts at the one-line floor
+    /// and grows as chunks arrive, instead of staying at the minimum while the
+    /// text scrolls inside a keyhole.
+    func testStreamingCardGrowsWithItsText() {
+        let text = String(
+            repeating: "流式正文用于验证卡片高度随内容增长，这句话需要足够长以便折行。", count: 8
+        )
+        let app = launch(seed: "grow", results: 1, streaming: true, resultText: text)
+        let card = app.buttons.matching(identifier: "result.copy").firstMatch
+        // The seeded stream starts after 3s; the footer button's origin moves
+        // down as the body above it grows.
+        let footerYBefore = card.frame.origin.y
+
+        XCTAssertTrue(
+            waitUntil(timeout: 15) { card.frame.origin.y > footerYBefore + 20 },
+            "card body never grew with the stream (footer y \(footerYBefore) -> \(card.frame.origin.y))"
+        )
+    }
+
+    /// Scrolling while the text streams holds the cards' height, because the
+    /// window fit is deferred under the user's fingers. Two things must hold:
+    /// nothing may grow past the frozen window while the gesture lasts, and the
+    /// cards must catch up once it ends.
+    ///
+    /// The scroll is posted as real CGEvents. `XCUIElement.scroll` never reaches
+    /// the app's `NSEvent` monitor, so a test written with it exercised none of
+    /// this and passed against a build where it was plainly broken by hand.
+    func testCardsStayInsideTheWindowWhileScrollingThroughTheStream() {
+        let text = String(
+            repeating: "流式正文用于验证滚动期间被冻结的高度在滚动结束后能追上内容。", count: 10
+        )
+        let app = launch(seed: "scroll-grow", results: 2, streaming: true, resultText: text)
+        let footers = app.buttons.matching(identifier: "result.copy")
+        let firstFooterYBefore = footers.firstMatch.frame.origin.y
+
+        // The seeded stream starts at 3s; scroll without a pause across it, so
+        // the hold never gets the 200ms of quiet that releases it.
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            postScrollUp(in: panel(app).frame)
+            usleep(16_000)
+            // Frozen window + growing card = content pushed out of the panel.
+            let panelFrame = panel(app).frame
+            for i in 0..<footers.count {
+                XCTAssertLessThanOrEqual(
+                    footers.element(boundBy: i).frame.maxY, panelFrame.maxY + 1,
+                    "card \(i) grew past the frozen window while scrolling"
+                )
+            }
+        }
+
+        XCTAssertTrue(
+            waitUntil(timeout: 6) { footers.firstMatch.frame.origin.y > firstFooterYBefore + 20 },
+            "cards never caught up after the scroll settled (footer y \(firstFooterYBefore) -> \(footers.firstMatch.frame.origin.y))"
+        )
+    }
+
+    /// One scroll-up tick over the middle of `frame`, as a real HID event.
+    private func postScrollUp(in frame: CGRect) {
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: nil, units: .pixel,
+            wheelCount: 1, wheel1: 12, wheel2: 0, wheel3: 0
+        ) else { return }
+        event.location = CGPoint(x: frame.midX, y: frame.midY)
+        event.post(tap: .cghidEventTap)
     }
 }

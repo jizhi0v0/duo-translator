@@ -8,16 +8,16 @@ struct ResultCardView: View {
     @Binding var isCollapsed: Bool
     /// BCP-47 code of the run's target language, for voice selection.
     var targetLanguage: String?
-    /// Ceiling for this card's stable body viewport. Passed in so the viewport
-    /// can shrink when several providers share the window (keeping every header
-    /// visible); overflow scrolls internally via TextKit 2.
+    /// Ceiling for this card's body. Passed in so the viewport shrinks when
+    /// several providers share the window (keeping every header visible);
+    /// overflow scrolls internally via TextKit 2.
     var maxBodyHeight: CGFloat
     var onRetry: () -> Void
     /// Apple language-pack download, invoked from the in-card prompt.
     var onDownloadApple: (String?, String) -> Void
 
-    /// Natural height of the streamed text, reported (throttled) by the text
-    /// view. `nil` until the first measurement lands.
+    /// Natural height of the streamed text, reported by the text view. `nil`
+    /// until the first measurement lands.
     @State private var measuredBodyHeight: CGFloat?
 
     /// Viewport reserved as soon as the card appears, before any measurement:
@@ -39,32 +39,33 @@ struct ResultCardView: View {
                         thinkingSection
                         Divider().padding(.horizontal, 10)
                     }
-                    // Always mounted at a stable height. Streaming changes only
-                    // the text storage; it never changes the card/window layout.
+                    // Grows with the streamed text up to `maxBodyHeight`, then
+                    // scrolls inside itself.
                     StreamingTextView(
                         model: engineRun.stream,
                         heightCeiling: maxBodyHeight,
+                        settled: !isStreaming,
                         // Safe to assign straight into @State: the text view always
                         // reports from a dispatched block, never inside a SwiftUI
                         // update pass.
                         onContentHeightChange: { height in measuredBodyHeight = height }
                     )
                     .frame(height: bodyHeight)
-                        .overlay(alignment: .topLeading) {
-                            if isAwaitingContent {
-                                // Match the streamed text exactly — same 14pt size and
-                                // the NSTextView's 10/8 inset — so when the first chunk
-                                // replaces this placeholder the glyphs don't shift size
-                                // or position. Only the content (and its color) changes,
-                                // so the swap reads as a clean replacement instead of a
-                                // flicker where the text jumps as it turns white.
-                                Text("翻译中…")
-                                    .font(.system(size: 14))
-                                    .foregroundStyle(.tertiary)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 8)
-                            }
+                    .overlay(alignment: .topLeading) {
+                        if isAwaitingContent {
+                            // Match the streamed text exactly — same 14pt size and
+                            // the NSTextView's 10/8 inset — so when the first chunk
+                            // replaces this placeholder the glyphs don't shift size
+                            // or position. Only the content (and its color) changes,
+                            // so the swap reads as a clean replacement instead of a
+                            // flicker where the text jumps as it turns white.
+                            Text("翻译中…")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
                         }
+                    }
                     Divider().padding(.horizontal, 10)
                     footer
                 }
@@ -148,10 +149,14 @@ struct ResultCardView: View {
         }
     }
 
+    private var isStreaming: Bool {
+        if case .streaming = engineRun.state { return true }
+        return false
+    }
+
     /// Streaming but no body text yet — show the "翻译中…" placeholder overlay.
     private var isAwaitingContent: Bool {
-        if case .streaming = engineRun.state { return !engineRun.hasContent }
-        return false
+        isStreaming && !engineRun.hasContent
     }
 
     /// Follows the streamed content from `minBodyHeight` up to the card's share

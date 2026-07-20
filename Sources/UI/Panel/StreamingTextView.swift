@@ -62,8 +62,12 @@ struct StreamingTextView: NSViewRepresentable {
     /// Measurement stops once the content reaches it, so a long stream doesn't
     /// keep paying for whole-document layout on every chunk.
     var heightCeiling: CGFloat = 0
-    /// Natural content height, reported (throttled) as the stream grows. Opt-in:
-    /// without a handler the view never measures.
+    /// The run has stopped streaming. Flipping this forces one final
+    /// measurement, so a finished translation can never be left at a stale
+    /// height by the ceiling short-circuit.
+    var settled: Bool = false
+    /// Natural content height, reported as the stream grows. Opt-in: without a
+    /// handler the view never measures.
     var onContentHeightChange: ((CGFloat) -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -83,10 +87,18 @@ struct StreamingTextView: NSViewRepresentable {
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        // NSTextContainer adds 5pt of line-fragment padding on top of
+        // `textContainerInset`. Left in, the body text sits at 15pt while the
+        // card's header, footer and the "翻译中…" placeholder sit at 10 — visibly
+        // misaligned, and the placeholder shifts sideways as the first chunk
+        // replaces it. Zero it so the inset is the only inset.
+        textView.textContainer?.lineFragmentPadding = 0
 
         let font = NSFont.systemFont(ofSize: fontSize)
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 3
+        // Keep in sync with `PanelLayout.bodyLineSpacing`, which the card's
+        // line-aligned height math depends on.
+        paragraph.lineSpacing = PanelLayout.bodyLineSpacing
         // Gap after each paragraph (only at line breaks, not on soft wraps) so
         // multi-paragraph translations read with breathing room instead of every
         // line jammed together.
@@ -106,7 +118,7 @@ struct StreamingTextView: NSViewRepresentable {
 
         context.coordinator.setup(textView: textView, attributes: attributes)
         context.coordinator.configureHeightReporting(
-            ceiling: heightCeiling, handler: onContentHeightChange
+            ceiling: heightCeiling, settled: settled, handler: onContentHeightChange
         )
         context.coordinator.bindModel(model)
         return scrollView
@@ -114,7 +126,7 @@ struct StreamingTextView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.configureHeightReporting(
-            ceiling: heightCeiling, handler: onContentHeightChange
+            ceiling: heightCeiling, settled: settled, handler: onContentHeightChange
         )
         // Each translation run hands the view a fresh StreamingTextModel; without
         // rebinding, only the first run would ever render.
@@ -132,13 +144,10 @@ struct StreamingTextView: NSViewRepresentable {
         private var lastWidth: CGFloat = 0
         private var reachedHeightCeiling = false
         private var heightReportScheduled = false
-        private var forceNextHeightReport = false
-        /// False until a report has landed for the current run's content. The
-        /// first chunk is measured immediately (an engine like Apple delivers the
-        /// whole translation in one go — throttling that would show the finished
-        /// text overflowing a card that only catches up a beat later); the rest of
-        /// the stream goes through the throttle.
-        private var reportedContentHeight = false
+        /// Set where the document may legitimately get shorter (a new run, or a
+        /// rewrap); cleared by the next report. See the guard in the report.
+        private var allowsShrink = true
+        private var hasSettled = false
 
         /// One-time wiring of the views.
         func setup(
@@ -160,17 +169,35 @@ struct StreamingTextView: NSViewRepresentable {
             guard let width = textView?.bounds.width, abs(width - lastWidth) > 1 else { return }
             lastWidth = width
             reachedHeightCeiling = false
+            // A rewrap can genuinely make the document shorter (wider view, fewer
+            // wrapped lines), so this measurement is allowed to shrink the host.
+            allowsShrink = true
+            lastReportedHeight = 0
             scheduleHeightReport(force: true)
         }
 
-        func configureHeightReporting(ceiling: CGFloat, handler: ((CGFloat) -> Void)?) {
+        func configureHeightReporting(
+            ceiling: CGFloat, settled: Bool, handler: ((CGFloat) -> Void)?
+        ) {
             onContentHeightChange = handler
-            guard abs(ceiling - heightCeiling) > 1 else { return }
+            // A raised ceiling means the content may grow further than the last
+            // report, so measuring has to resume. The run settling likewise gets
+            // one fresh measurement, so a finished translation can never be left
+            // at a height the ceiling short-circuit stopped updating.
+            let ceilingChanged = abs(ceiling - heightCeiling) > 1
+            let justSettled = settled && !hasSettled
             heightCeiling = ceiling
-            // A raised ceiling means the content may be allowed to grow further
-            // than the last report, so measuring has to resume.
+            hasSettled = settled
+            guard ceilingChanged || justSettled else { return }
             reachedHeightCeiling = false
             scheduleHeightReport(force: true)
+            // Measure again shortly after: a measurement taken while the view is
+            // being scrolled can read TextKit's re-estimated layout rather than
+            // the real one. The report is monotonic within a run, so this can
+            // only correct the height upward, never shrink the card.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.scheduleHeightReport(force: true)
+            }
         }
 
         /// Attach to the run's text model. Called on every SwiftUI update; each
@@ -190,8 +217,10 @@ struct StreamingTextView: NSViewRepresentable {
             model = newModel
 
             resetText()
-            if !newModel.fullText.isEmpty {
-                append(newModel.fullText)
+            // Replay only what has been revealed so far; the pacer keeps
+            // feeding the rest.
+            if !newModel.revealedText.isEmpty {
+                append(newModel.revealedText)
             }
             installCallbacks(on: newModel)
         }
@@ -199,24 +228,29 @@ struct StreamingTextView: NSViewRepresentable {
         private func scheduleHeightReport(force: Bool) {
             guard onContentHeightChange != nil else { return }
             if reachedHeightCeiling, !force { return }
-            forceNextHeightReport = forceNextHeightReport || force
             guard !heightReportScheduled else { return }
             heightReportScheduled = true
-            // Throttled: a chunk arrives every few milliseconds, but the card only
-            // needs to catch up with the content a few times a second, and each
-            // measurement forces a whole-document layout.
-            let delay: TimeInterval = force ? 0 : 0.12
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            // No throttle: appends are already paced to one per frame, so this is
+            // at most one measurement per frame, and it stops entirely once the
+            // body reaches its ceiling. Delaying it is what made the height trail
+            // the glyphs by a wrapped line or two.
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.heightReportScheduled = false
-                let forceReport = self.forceNextHeightReport
-                self.forceNextHeightReport = false
                 guard let handler = self.onContentHeightChange,
                       let textView = self.textView,
                       let height = documentHeight(of: textView) else { return }
-                self.reportedContentHeight = (textView.textStorage?.length ?? 0) > 0
                 self.reachedHeightCeiling = height >= self.heightCeiling - 1
-                guard forceReport || abs(height - self.lastReportedHeight) > 1 else { return }
+                // Within a run the document only grows (appends are the only
+                // edit), so a measurement that comes back *shorter* is not the
+                // content shrinking — it is TextKit 2 having dropped or
+                // re-estimated layout outside the viewport, which is exactly
+                // what happens while the view is scrolled hard. Trusting it
+                // collapsed the card mid-run. Shrinking is allowed only where
+                // the content genuinely can: a new run, or a width change that
+                // rewraps the text.
+                guard height > self.lastReportedHeight + 1 || self.allowsShrink else { return }
+                self.allowsShrink = false
                 self.lastReportedHeight = height
                 handler(height)
             }
@@ -241,7 +275,7 @@ struct StreamingTextView: NSViewRepresentable {
             // A translation is read top-down, so don't follow the stream to the
             // bottom — leave the scroll position where it is (at the top for a
             // fresh run) so the reader starts from the beginning.
-            scheduleHeightReport(force: !reportedContentHeight)
+            scheduleHeightReport(force: false)
         }
 
         private func resetText() {
@@ -253,11 +287,11 @@ struct StreamingTextView: NSViewRepresentable {
             )
             storage.endEditing()
             textView.scroll(.zero) // new run starts at the top
-            // A new run must pull the card back down to its floor, so report even
-            // though the emptied document is shorter than the last report.
+            // A new run must pull the card back down to its floor, so this is one
+            // of the two places a shorter measurement is real.
             lastReportedHeight = 0
             reachedHeightCeiling = false
-            reportedContentHeight = false
+            allowsShrink = true
             scheduleHeightReport(force: true)
         }
     }
@@ -353,7 +387,9 @@ struct PageReaderView: NSViewRepresentable {
         private var lastWidth: CGFloat = 0
         private var reachedHeightCeiling = false
         private var heightReportScheduled = false
-        private var forceNextHeightReport = false
+        /// Set where the document may legitimately get shorter (a new run, or a
+        /// rewrap); cleared by the next report. See the guard in the report.
+        private var allowsShrink = true
 
         func setup(textView: NSTextView, onContentHeightChange: ((CGFloat) -> Void)?) {
             self.textView = textView
@@ -369,6 +405,10 @@ struct PageReaderView: NSViewRepresentable {
             guard let width = textView?.bounds.width, abs(width - lastWidth) > 1 else { return }
             lastWidth = width
             reachedHeightCeiling = false
+            // A rewrap can genuinely make the document shorter (wider view, fewer
+            // wrapped lines), so this measurement is allowed to shrink the host.
+            allowsShrink = true
+            lastReportedHeight = 0
             scheduleHeightReport(force: true)
         }
 
@@ -387,7 +427,7 @@ struct PageReaderView: NSViewRepresentable {
             let modelChanged = model !== newModel
             let contentConfigurationChanged = original != newOriginal || bilingual != newBilingual
                 || streamSettled != newStreamSettled
-            let visiblePlaceholderChanged = placeholder != newPlaceholder && newModel.fullText.isEmpty
+            let visiblePlaceholderChanged = placeholder != newPlaceholder && newModel.revealedText.isEmpty
             let shouldRebuild = modelChanged || contentConfigurationChanged || visiblePlaceholderChanged
             let shouldResetScroll = modelChanged || resetKey != newResetKey
             let ceilingChanged = abs(heightCeiling - newHeightCeiling) > 1
@@ -417,8 +457,11 @@ struct PageReaderView: NSViewRepresentable {
         private func rebuildContent(resetScroll: Bool) {
             guard let textView else { return }
             applyProjection()
+            // A rebuild replaces the document (new run, 仅译文 ↔ 对照), so it may
+            // legitimately be shorter than what was last reported.
             lastReportedHeight = 0
             reachedHeightCeiling = false
+            allowsShrink = true
             if resetScroll { textView.scroll(.zero) }
             scheduleHeightReport(force: true)
         }
@@ -426,7 +469,7 @@ struct PageReaderView: NSViewRepresentable {
         private func append(_ chunk: String) {
             guard !chunk.isEmpty else { return }
             // The projection (placeholder / 仅译文 / interleaved 对照) is
-            // recomputed from `fullText`, which already contains this flushed
+            // recomputed from `revealedText`, which already contains this flushed
             // chunk; extending the storage by the projection's suffix keeps the
             // append-only TextKit path for every mode. Height fitting is
             // throttled and stops after the scroll ceiling, while glyphs still
@@ -442,7 +485,7 @@ struct PageReaderView: NSViewRepresentable {
             guard let model else { return NSAttributedString() }
             let blocks = PageModeLayout.textBlocks(
                 original: original,
-                translation: model.fullText,
+                translation: model.revealedText,
                 bilingual: bilingual,
                 placeholder: placeholder,
                 settled: streamSettled
@@ -493,20 +536,29 @@ struct PageReaderView: NSViewRepresentable {
 
         private func scheduleHeightReport(force: Bool) {
             if reachedHeightCeiling, !force { return }
-            forceNextHeightReport = forceNextHeightReport || force
             guard !heightReportScheduled else { return }
             heightReportScheduled = true
-            let delay: TimeInterval = force ? 0 : 0.12
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            // No throttle, same as the cards: the pacer already limits appends to
+            // one per frame, and measuring stops for good once the page reaches
+            // its ceiling (which a long document does almost immediately). A
+            // delay here is simply the page lagging its own text.
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.heightReportScheduled = false
-                let forceReport = self.forceNextHeightReport
-                self.forceNextHeightReport = false
                 guard let handler = self.onContentHeightChange,
                       let textView = self.textView,
                       let height = documentHeight(of: textView) else { return }
                 self.reachedHeightCeiling = height >= self.heightCeiling - 1
-                guard forceReport || abs(height - self.lastReportedHeight) > 1 else { return }
+                // Within a run the document only grows (appends are the only
+                // edit), so a measurement that comes back *shorter* is not the
+                // content shrinking — it is TextKit 2 having dropped or
+                // re-estimated layout outside the viewport, which is exactly
+                // what happens while the view is scrolled hard. Trusting it
+                // collapsed the card mid-run. Shrinking is allowed only where
+                // the content genuinely can: a new run, or a width change that
+                // rewraps the text.
+                guard height > self.lastReportedHeight + 1 || self.allowsShrink else { return }
+                self.allowsShrink = false
                 self.lastReportedHeight = height
                 handler(height)
             }
