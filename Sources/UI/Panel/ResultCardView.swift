@@ -16,11 +16,14 @@ struct ResultCardView: View {
     /// Apple language-pack download, invoked from the in-card prompt.
     var onDownloadApple: (String?, String) -> Void
 
-    /// A compact, readable viewport that is reserved as soon as the card
-    /// appears. Keeping it constant is important: if it followed the streamed
-    /// text's natural height, every new line would push the cards below it and
-    /// repeatedly resize the whole panel.
-    private static let preferredBodyHeight: CGFloat = 96
+    /// Natural height of the streamed text, reported (throttled) by the text
+    /// view. `nil` until the first measurement lands.
+    @State private var measuredBodyHeight: CGFloat?
+
+    /// Viewport reserved as soon as the card appears, before any measurement:
+    /// a single line, just enough for the "翻译中…" placeholder. The body grows
+    /// from here with the streamed content and stops at `maxBodyHeight`.
+    private static let minBodyHeight: CGFloat = 40
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,8 +41,15 @@ struct ResultCardView: View {
                     }
                     // Always mounted at a stable height. Streaming changes only
                     // the text storage; it never changes the card/window layout.
-                    StreamingTextView(model: engineRun.stream)
-                        .frame(height: stableBodyHeight)
+                    StreamingTextView(
+                        model: engineRun.stream,
+                        heightCeiling: maxBodyHeight,
+                        // Safe to assign straight into @State: the text view always
+                        // reports from a dispatched block, never inside a SwiftUI
+                        // update pass.
+                        onContentHeightChange: { height in measuredBodyHeight = height }
+                    )
+                    .frame(height: bodyHeight)
                         .overlay(alignment: .topLeading) {
                             if isAwaitingContent {
                                 // Match the streamed text exactly — same 14pt size and
@@ -144,11 +154,12 @@ struct ResultCardView: View {
         return false
     }
 
-    /// Snap to a whole-line height so the viewport never exposes a clipped last
-    /// line. This value depends only on the run layout, never streamed content.
-    private var stableBodyHeight: CGFloat {
-        PanelLayout.stableBodyHeight(
-            preferred: Self.preferredBodyHeight,
+    /// Follows the streamed content from `minBodyHeight` up to the card's share
+    /// of the window; past that the body scrolls internally instead of growing.
+    private var bodyHeight: CGFloat {
+        PanelLayout.growingBodyHeight(
+            measured: measuredBodyHeight,
+            floor: Self.minBodyHeight,
             cap: maxBodyHeight
         )
     }

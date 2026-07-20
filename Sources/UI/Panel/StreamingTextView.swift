@@ -24,6 +24,29 @@ private final class ResultScrollView: NSScrollView {
     }
 }
 
+/// Height of the currently laid-out document, insets included.
+///
+/// Deliberately *not* `usageBoundsForTextContainer`: TextKit 2 updates that
+/// lazily, so it keeps reporting the previous extent for a beat after the text
+/// storage changes. That lag is visible — a card stays at the last run's height
+/// while showing only "翻译中…", and a one-shot translation (Apple) overflows a
+/// viewport that catches up late. The last layout fragment's frame is always
+/// current, and `.ensuresLayout` makes the measurement authoritative.
+@MainActor
+private func documentHeight(of textView: NSTextView) -> CGFloat? {
+    guard let lm = textView.textLayoutManager else { return nil }
+    lm.ensureLayout(for: lm.documentRange)
+    var bottom: CGFloat = 0
+    lm.enumerateTextLayoutFragments(
+        from: lm.documentRange.endLocation,
+        options: [.reverse, .ensuresLayout]
+    ) { fragment in
+        bottom = fragment.layoutFragmentFrame.maxY
+        return false // the last fragment alone gives the document's bottom
+    }
+    return bottom + textView.textContainerInset.height * 2
+}
+
 /// TextKit 2 backed streaming result view.
 ///
 /// Performance rules (do not break):
@@ -35,6 +58,13 @@ private final class ResultScrollView: NSScrollView {
 struct StreamingTextView: NSViewRepresentable {
     let model: StreamingTextModel
     var fontSize: CGFloat = 14
+    /// Height at which the host stops growing and this view starts scrolling.
+    /// Measurement stops once the content reaches it, so a long stream doesn't
+    /// keep paying for whole-document layout on every chunk.
+    var heightCeiling: CGFloat = 0
+    /// Natural content height, reported (throttled) as the stream grows. Opt-in:
+    /// without a handler the view never measures.
+    var onContentHeightChange: ((CGFloat) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -75,11 +105,17 @@ struct StreamingTextView: NSViewRepresentable {
         scrollView.contentView.postsBoundsChangedNotifications = true
 
         context.coordinator.setup(textView: textView, attributes: attributes)
+        context.coordinator.configureHeightReporting(
+            ceiling: heightCeiling, handler: onContentHeightChange
+        )
         context.coordinator.bindModel(model)
         return scrollView
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
+        context.coordinator.configureHeightReporting(
+            ceiling: heightCeiling, handler: onContentHeightChange
+        )
         // Each translation run hands the view a fresh StreamingTextModel; without
         // rebinding, only the first run would ever render.
         context.coordinator.bindModel(model)
@@ -90,6 +126,19 @@ struct StreamingTextView: NSViewRepresentable {
         private weak var textView: NSTextView?
         private var attributes: [NSAttributedString.Key: Any] = [:]
         private weak var model: StreamingTextModel?
+        private var onContentHeightChange: ((CGFloat) -> Void)?
+        private var heightCeiling: CGFloat = 0
+        private var lastReportedHeight: CGFloat = 0
+        private var lastWidth: CGFloat = 0
+        private var reachedHeightCeiling = false
+        private var heightReportScheduled = false
+        private var forceNextHeightReport = false
+        /// False until a report has landed for the current run's content. The
+        /// first chunk is measured immediately (an engine like Apple delivers the
+        /// whole translation in one go — throttling that would show the finished
+        /// text overflowing a card that only catches up a beat later); the rest of
+        /// the stream goes through the throttle.
+        private var reportedContentHeight = false
 
         /// One-time wiring of the views.
         func setup(
@@ -98,6 +147,30 @@ struct StreamingTextView: NSViewRepresentable {
         ) {
             self.textView = textView
             self.attributes = attributes
+            textView.postsFrameChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(frameChanged),
+                name: NSView.frameDidChangeNotification, object: textView
+            )
+        }
+
+        /// Re-measure after a real width change (panel width switches between
+        /// compact and page mode), since wrapping — and so the height — changes.
+        @objc private func frameChanged() {
+            guard let width = textView?.bounds.width, abs(width - lastWidth) > 1 else { return }
+            lastWidth = width
+            reachedHeightCeiling = false
+            scheduleHeightReport(force: true)
+        }
+
+        func configureHeightReporting(ceiling: CGFloat, handler: ((CGFloat) -> Void)?) {
+            onContentHeightChange = handler
+            guard abs(ceiling - heightCeiling) > 1 else { return }
+            heightCeiling = ceiling
+            // A raised ceiling means the content may be allowed to grow further
+            // than the last report, so measuring has to resume.
+            reachedHeightCeiling = false
+            scheduleHeightReport(force: true)
         }
 
         /// Attach to the run's text model. Called on every SwiftUI update; each
@@ -123,6 +196,34 @@ struct StreamingTextView: NSViewRepresentable {
             installCallbacks(on: newModel)
         }
 
+        private func scheduleHeightReport(force: Bool) {
+            guard onContentHeightChange != nil else { return }
+            if reachedHeightCeiling, !force { return }
+            forceNextHeightReport = forceNextHeightReport || force
+            guard !heightReportScheduled else { return }
+            heightReportScheduled = true
+            // Throttled: a chunk arrives every few milliseconds, but the card only
+            // needs to catch up with the content a few times a second, and each
+            // measurement forces a whole-document layout.
+            let delay: TimeInterval = force ? 0 : 0.12
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                self.heightReportScheduled = false
+                let forceReport = self.forceNextHeightReport
+                self.forceNextHeightReport = false
+                guard let handler = self.onContentHeightChange,
+                      let textView = self.textView,
+                      let height = documentHeight(of: textView) else { return }
+                self.reportedContentHeight = (textView.textStorage?.length ?? 0) > 0
+                self.reachedHeightCeiling = height >= self.heightCeiling - 1
+                guard forceReport || abs(height - self.lastReportedHeight) > 1 else { return }
+                self.lastReportedHeight = height
+                handler(height)
+            }
+        }
+
+        deinit { NotificationCenter.default.removeObserver(self) }
+
         private func installCallbacks(on model: StreamingTextModel) {
             model.onAppend = { [weak self] chunk in
                 self?.append(chunk)
@@ -140,6 +241,7 @@ struct StreamingTextView: NSViewRepresentable {
             // A translation is read top-down, so don't follow the stream to the
             // bottom — leave the scroll position where it is (at the top for a
             // fresh run) so the reader starts from the beginning.
+            scheduleHeightReport(force: !reportedContentHeight)
         }
 
         private func resetText() {
@@ -151,6 +253,12 @@ struct StreamingTextView: NSViewRepresentable {
             )
             storage.endEditing()
             textView.scroll(.zero) // new run starts at the top
+            // A new run must pull the card back down to its floor, so report even
+            // though the emptied document is shorter than the last report.
+            lastReportedHeight = 0
+            reachedHeightCeiling = false
+            reportedContentHeight = false
+            scheduleHeightReport(force: true)
         }
     }
 }
@@ -396,10 +504,7 @@ struct PageReaderView: NSViewRepresentable {
                 self.forceNextHeightReport = false
                 guard let handler = self.onContentHeightChange,
                       let textView = self.textView,
-                      let lm = textView.textLayoutManager else { return }
-                lm.ensureLayout(for: lm.documentRange)
-                let height = lm.usageBoundsForTextContainer.height
-                    + textView.textContainerInset.height * 2
+                      let height = documentHeight(of: textView) else { return }
                 self.reachedHeightCeiling = height >= self.heightCeiling - 1
                 guard forceReport || abs(height - self.lastReportedHeight) > 1 else { return }
                 self.lastReportedHeight = height

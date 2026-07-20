@@ -95,7 +95,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// Hard ceiling for content-driven growth (input, card count, expanded
     /// thinking, and page mode). Compact result bodies themselves use stable
     /// viewports and scroll internally instead of resizing while streaming.
-    private static let maxHeight: CGFloat = 760
+    private static let maxHeight: CGFloat = 820
     /// Margin kept above and below the panel when it fills a tall screen.
     private static let screenPadding: CGFloat = 24
     /// Floor for the result-list budget (space left for cards after chrome), so
@@ -582,10 +582,23 @@ enum PanelLayout {
         return bodyVInset * 2 + k * bodyLineHeight + (k - 1) * bodyLineSpacing
     }
 
-    /// Stable compact-card body height. It is deliberately independent of the
-    /// streamed text length: content growth must scroll inside the card instead
-    /// of moving every card below it and resizing the panel on each new line.
+    /// Reserved compact-card body height before any content measurement: a
+    /// line-aligned floor that is claimed as soon as the card appears, so a card
+    /// never starts as a sliver and then jumps.
     static func stableBodyHeight(preferred: CGFloat, cap: CGFloat) -> CGFloat {
         lineAlignedBodyHeight(atMost: Swift.min(preferred, cap))
+    }
+
+    /// Compact-card body height that follows the streamed content: it starts at
+    /// the line-aligned `floor`, grows with the measured natural height, and
+    /// stops at `cap` (the card's share of the window), past which the body
+    /// scrolls internally instead of pushing the panel taller.
+    static func growingBodyHeight(measured: CGFloat?, floor: CGFloat, cap: CGFloat) -> CGFloat {
+        let base = stableBodyHeight(preferred: floor, cap: cap)
+        guard let measured else { return base }
+        // The ceiling is snapped to whole lines so a capped body scrolls from a
+        // clean line boundary rather than slicing a line in half.
+        let ceiling = lineAlignedBodyHeight(atMost: cap)
+        return Swift.min(Swift.max(measured, base), ceiling)
     }
 }

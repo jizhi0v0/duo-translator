@@ -195,4 +195,47 @@ final class PanelLayoutTests: XCTestCase {
         XCTAssertEqual(h, PanelLayout.lineAlignedBodyHeight(atMost: 72))
         XCTAssertLessThanOrEqual(h, 72)
     }
+
+    // MARK: - Growing result body (grows with content, stops at the card's cap)
+
+    func testGrowingBodyStartsAtFloorBeforeMeasurement() {
+        let h = PanelLayout.growingBodyHeight(measured: nil, floor: 96, cap: 300)
+        XCTAssertEqual(h, PanelLayout.stableBodyHeight(preferred: 96, cap: 300))
+    }
+
+    func testGrowingBodyKeepsFloorForShortContent() {
+        let floor = PanelLayout.stableBodyHeight(preferred: 96, cap: 300)
+        let h = PanelLayout.growingBodyHeight(measured: 30, floor: 96, cap: 300)
+        XCTAssertEqual(h, floor)
+    }
+
+    func testGrowingBodyFollowsContentBetweenFloorAndCap() {
+        let h = PanelLayout.growingBodyHeight(measured: 210, floor: 96, cap: 300)
+        XCTAssertEqual(h, 210)
+    }
+
+    func testGrowingBodyStopsAtCapOnWholeLines() {
+        let h = PanelLayout.growingBodyHeight(measured: 900, floor: 96, cap: 300)
+        XCTAssertEqual(h, PanelLayout.lineAlignedBodyHeight(atMost: 300))
+        XCTAssertLessThanOrEqual(h, 300)
+    }
+
+    func testGrowingBodyIsMonotonicInContentHeight() {
+        var previous = PanelLayout.growingBodyHeight(measured: nil, floor: 96, cap: 300)
+        for measured in stride(from: CGFloat(0), through: 600, by: 7) {
+            let h = PanelLayout.growingBodyHeight(measured: measured, floor: 96, cap: 300)
+            XCTAssertGreaterThanOrEqual(h, previous)
+            XCTAssertLessThanOrEqual(h, 300)
+            previous = h
+        }
+    }
+
+    /// A cap tighter than the floor (many providers sharing a short window) must
+    /// still win — the card never grows past its share of the result area.
+    func testGrowingBodyNeverExceedsATightCap() {
+        for measured in [CGFloat(0), 50, 96, 400] {
+            let h = PanelLayout.growingBodyHeight(measured: measured, floor: 96, cap: 72)
+            XCTAssertLessThanOrEqual(h, 72)
+        }
+    }
 }
