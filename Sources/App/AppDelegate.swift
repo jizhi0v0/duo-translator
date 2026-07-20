@@ -8,6 +8,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var editKeyMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before anything reads settings: a UI-test run must not inherit — or
+        // leave behind — real preferences. A test that resizes a card would
+        // otherwise persist that height into the user's own defaults and every
+        // later run (test or not) would start from it.
+        if ProcessInfo.processInfo.arguments.contains("-uiTest") {
+            SettingsStore.resetForUITests()
+        }
+
         // LSUIElement apps have no visible menu bar, but a main menu must still
         // exist for ⌘C/⌘V/⌘A/⌘Z key equivalents to reach text fields.
         NSApp.mainMenu = Self.buildMainMenu()

@@ -63,8 +63,11 @@ struct ResultListView: View {
         PanelLayout.perCardBodyMax(
             count: run.runs.count,
             budget: viewModel.resultAreaBudget - 20,
-            cardChrome: 82,
+            cardChrome: Self.cardChrome,
             floor: 96
         )
     }
+
+    /// Header + divider/grab band + footer around each card's body.
+    private static let cardChrome: CGFloat = 90
 }

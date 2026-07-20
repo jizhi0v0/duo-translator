@@ -16,14 +16,22 @@ struct ResultCardView: View {
     /// Apple language-pack download, invoked from the in-card prompt.
     var onDownloadApple: (String?, String) -> Void
 
+    @ObservedObject private var settings = SettingsStore.shared
     /// Natural height of the streamed text, reported by the text view. `nil`
     /// until the first measurement lands.
     @State private var measuredBodyHeight: CGFloat?
+    /// Live height while the divider is being dragged, and the height the drag
+    /// started from. Both nil when no drag is in progress.
+    @State private var dragHeight: CGFloat?
+    @State private var dragStartHeight: CGFloat?
 
     /// Viewport reserved as soon as the card appears, before any measurement:
     /// a single line, just enough for the "翻译中…" placeholder. The body grows
     /// from here with the streamed content and stops at `maxBodyHeight`.
     private static let minBodyHeight: CGFloat = 40
+    /// Padding above and below the divider that makes up the grab band. Counted
+    /// into `ResultListView.cardChrome`.
+    private static let grabBandPadding: CGFloat = 6
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,7 +74,7 @@ struct ResultCardView: View {
                                 .padding(.vertical, 8)
                         }
                     }
-                    Divider().padding(.horizontal, 10)
+                    resizeDivider
                     footer
                 }
             }
@@ -159,14 +167,71 @@ struct ResultCardView: View {
         isStreaming && !engineRun.hasContent
     }
 
-    /// Follows the streamed content from `minBodyHeight` up to the card's share
-    /// of the window; past that the body scrolls internally instead of growing.
+    /// The dragged height if there is one, otherwise it follows the streamed
+    /// content from `minBodyHeight` up to the card's share of the window; past
+    /// that the body scrolls internally instead of growing.
     private var bodyHeight: CGFloat {
-        PanelLayout.growingBodyHeight(
+        PanelLayout.bodyHeight(
+            dragged: dragHeight ?? settings.resultBodyHeight(for: engineRun.id),
             measured: measuredBodyHeight,
             floor: Self.minBodyHeight,
             cap: maxBodyHeight
         )
+    }
+
+    /// The divider above the footer doubles as a resize handle: drag it to set
+    /// this card's height, ⌥-drag to set every card's, double-click to go back
+    /// to following the content (⌥ double-click resets all of them).
+    private var resizeDivider: some View {
+        Divider()
+            .padding(.horizontal, 10)
+            // The line itself is 1pt — far too thin to aim at. The band around
+            // it is the real target; `contentShape` makes the transparent part
+            // hit-testable so the whole strip drags, not just the pixel line.
+            .padding(.vertical, Self.grabBandPadding)
+            .contentShape(Rectangle())
+            // The cursor is owned by an AppKit tracking area rather than
+            // `.onHover` + `NSCursor.push/pop`: the text view above sets an
+            // I-beam of its own, and whichever one ran last used to win, so the
+            // resize cursor showed up only sometimes.
+            .background(ResizeCursorArea())
+            .gesture(
+                // Global coordinate space, not the divider's own: resizing moves
+                // the divider under the pointer, and a translation measured in
+                // the moving view's space cancels out half of every drag (the
+                // card tracked the pointer at half speed).
+                DragGesture(minimumDistance: 2, coordinateSpace: .global)
+                    .onChanged { value in
+                        // Measured from the height at gesture start, so the
+                        // resize can't feed back into its own input.
+                        let base = dragStartHeight ?? bodyHeight
+                        if dragStartHeight == nil { dragStartHeight = base }
+                        dragHeight = PanelLayout.clampDraggedBodyHeight(
+                            base + value.translation.height,
+                            floor: Self.minBodyHeight,
+                            cap: maxBodyHeight
+                        )
+                    }
+                    .onEnded { _ in
+                        if let height = dragHeight {
+                            if NSEvent.modifierFlags.contains(.option) {
+                                settings.setResultBodyHeightForAllEngines(height)
+                            } else {
+                                settings.setResultBodyHeight(height, for: engineRun.id)
+                            }
+                        }
+                        dragStartHeight = nil
+                        dragHeight = nil
+                    }
+            )
+            .onTapGesture(count: 2) {
+                if NSEvent.modifierFlags.contains(.option) {
+                    settings.clearAllResultBodyHeights()
+                } else {
+                    settings.clearResultBodyHeight(for: engineRun.id)
+                }
+            }
+            .help("拖拽设置最大高度（⌥ 拖拽应用到全部卡片，双击恢复自动）")
     }
 
     private func downloadBody(source: String?, target: String) -> some View {
@@ -257,4 +322,32 @@ struct ResultCardView: View {
             }
         }
     }
+}
+
+/// Transparent strip that owns the resize cursor for a card's divider.
+///
+/// A `.cursorUpdate` tracking area (not `addCursorRect`, which needs a key
+/// window, and not SwiftUI's `.onHover`) is what makes the cursor reliable over
+/// a floating panel that may not be key.
+private struct ResizeCursorArea: NSViewRepresentable {
+    final class CursorView: NSView {
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.cursorUpdate, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                owner: self
+            ))
+        }
+
+        override func cursorUpdate(with event: NSEvent) { NSCursor.resizeUpDown.set() }
+        override func mouseEntered(with event: NSEvent) { NSCursor.resizeUpDown.set() }
+        override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
+        /// Never take the click: the SwiftUI drag gesture above owns it.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    func makeNSView(context: Context) -> NSView { CursorView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }

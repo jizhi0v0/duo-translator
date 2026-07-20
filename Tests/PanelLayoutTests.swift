@@ -230,6 +230,51 @@ final class PanelLayoutTests: XCTestCase {
         }
     }
 
+    // MARK: - Dragged body height
+
+    /// The dragged value is a ceiling, not a fixed height: a later short
+    /// translation must not sit in a tall box of empty space (which is what
+    /// made the old behaviour need a manual reset every time).
+    func testDraggedHeightActsAsACeiling() {
+        let h = PanelLayout.bodyHeight(dragged: 220, measured: 40, floor: 96, cap: 300)
+        XCTAssertEqual(h, PanelLayout.growingBodyHeight(measured: 40, floor: 96, cap: 220))
+        XCTAssertLessThan(h, 220)
+    }
+
+    func testDraggedCeilingStopsLongContent() {
+        let h = PanelLayout.bodyHeight(dragged: 120, measured: 900, floor: 96, cap: 300)
+        XCTAssertEqual(h, PanelLayout.lineAlignedBodyHeight(atMost: 120))
+    }
+
+    /// The window's own share still wins: a ceiling dragged (or restored from
+    /// defaults) larger than the card's slice can't push the card off-screen.
+    func testWindowShareWinsOverATallerDraggedCeiling() {
+        let h = PanelLayout.bodyHeight(dragged: 5000, measured: 900, floor: 96, cap: 300)
+        XCTAssertEqual(h, PanelLayout.lineAlignedBodyHeight(atMost: 300))
+    }
+
+    func testNoDragFallsBackToFollowingTheContent() {
+        let h = PanelLayout.bodyHeight(dragged: nil, measured: 210, floor: 96, cap: 300)
+        XCTAssertEqual(h, PanelLayout.growingBodyHeight(measured: 210, floor: 96, cap: 300))
+    }
+
+    func testDragIsClampedToTheCardsShareOfTheWindow() {
+        let tall = PanelLayout.clampDraggedBodyHeight(5000, floor: 96, cap: 300)
+        XCTAssertEqual(tall, PanelLayout.lineAlignedBodyHeight(atMost: 300))
+        let short = PanelLayout.clampDraggedBodyHeight(0, floor: 96, cap: 300)
+        XCTAssertEqual(short, PanelLayout.stableBodyHeight(preferred: 96, cap: 300))
+    }
+
+    /// Several providers in a short window: the cap can be tighter than the
+    /// floor, and a drag must not sneak past it in either direction.
+    func testDragStaysWithinATightCap() {
+        for height in [CGFloat(0), 50, 96, 400] {
+            let h = PanelLayout.clampDraggedBodyHeight(height, floor: 96, cap: 72)
+            XCTAssertLessThanOrEqual(h, 72)
+            XCTAssertGreaterThan(h, 0)
+        }
+    }
+
     /// A cap tighter than the floor (many providers sharing a short window) must
     /// still win — the card never grows past its share of the result area.
     func testGrowingBodyNeverExceedsATightCap() {

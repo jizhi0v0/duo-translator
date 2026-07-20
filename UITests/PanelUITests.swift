@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 /// End-to-end UI tests for the translator panel. The app is launched with the
@@ -34,6 +35,12 @@ final class PanelUITests: XCTestCase {
         XCTAssertTrue(a.buttons["input.copy"].waitForExistence(timeout: 10),
                       "panel did not appear")
         return a
+    }
+
+    /// The panel's own ceiling: the screen's visible height less the margin it
+    /// keeps top and bottom (`PanelController.screenPadding`, 24 each side).
+    private static var panelHeightCeiling: CGFloat {
+        (NSScreen.main?.visibleFrame.height ?? 1000) - 48 + 1
     }
 
     /// The panel container (top-level Group). Its frame is the panel's size.
@@ -124,7 +131,7 @@ final class PanelUITests: XCTestCase {
                       "the long completed result never fitted to page height")
         let firstPageHeight = panel(app).frame.height
         XCTAssertGreaterThan(panel(app).frame.height, 0)
-        XCTAssertLessThanOrEqual(panel(app).frame.height, 821)
+        XCTAssertLessThanOrEqual(panel(app).frame.height, Self.panelHeightCeiling)
 
         pageMode.click()
         XCTAssertTrue(waitUntil(timeout: 3) { abs(self.panel(app).frame.width - 480) < 8 },
@@ -151,7 +158,7 @@ final class PanelUITests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 3) { self.panel(app).frame.width > 600 },
                       "page mode never installed its wide layout")
         XCTAssertLessThan(panel(app).frame.height, 600,
-                          "an unmeasured loading page must not stretch to the 760pt ceiling")
+                          "an unmeasured loading page must not stretch to the ceiling")
     }
 
     func testPageReaderKeepsEveryParagraphAfterCompletedSwitch() {
@@ -272,9 +279,9 @@ final class PanelUITests: XCTestCase {
                 "result card \(i) footer is not reachable (clipped off-screen)")
         }
 
-        // The panel itself stays bounded by the growth ceiling.
-        XCTAssertLessThanOrEqual(panelFrame.height, 820 + 1,
-                                 "panel exceeded its height ceiling (\(panelFrame.height))")
+        // The panel itself stays within the screen (its only ceiling).
+        XCTAssertLessThanOrEqual(panelFrame.height, Self.panelHeightCeiling,
+                                 "panel exceeded the screen (\(panelFrame.height))")
     }
 
     /// A card's body follows its streamed text: it starts at the one-line floor
@@ -296,42 +303,134 @@ final class PanelUITests: XCTestCase {
         )
     }
 
-    /// Scrolling while the text streams holds the cards' height, because the
-    /// window fit is deferred under the user's fingers. Two things must hold:
-    /// nothing may grow past the frozen window while the gesture lasts, and the
-    /// cards must catch up once it ends.
+    /// Scrolling while the text streams must not leave the cards hanging out of
+    /// the window. The window fit trails a growing card by a frame or two, which
+    /// is fine; what is not fine is that overflow persisting — the regression
+    /// this catches froze the layout for the whole gesture, so the cards sat
+    /// outside the panel until the user let go.
     ///
     /// The scroll is posted as real CGEvents. `XCUIElement.scroll` never reaches
     /// the app's `NSEvent` monitor, so a test written with it exercised none of
     /// this and passed against a build where it was plainly broken by hand.
     func testCardsStayInsideTheWindowWhileScrollingThroughTheStream() {
         let text = String(
-            repeating: "流式正文用于验证滚动期间被冻结的高度在滚动结束后能追上内容。", count: 10
+            repeating: "流式正文用于验证滚动期间窗口始终跟得上卡片的增长。", count: 10
         )
         let app = launch(seed: "scroll-grow", results: 2, streaming: true, resultText: text)
         let footers = app.buttons.matching(identifier: "result.copy")
         let firstFooterYBefore = footers.firstMatch.frame.origin.y
 
-        // The seeded stream starts at 3s; scroll without a pause across it, so
-        // the hold never gets the 200ms of quiet that releases it.
+        // The seeded stream starts at 3s; scroll without a pause across it.
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             postScrollUp(in: panel(app).frame)
             usleep(16_000)
-            // Frozen window + growing card = content pushed out of the panel.
-            let panelFrame = panel(app).frame
             for i in 0..<footers.count {
-                XCTAssertLessThanOrEqual(
-                    footers.element(boundBy: i).frame.maxY, panelFrame.maxY + 1,
-                    "card \(i) grew past the frozen window while scrolling"
+                let footer = footers.element(boundBy: i)
+                guard footer.frame.maxY > panel(app).frame.maxY + 1 else { continue }
+                // Outside the window: the fit is allowed to be a frame behind,
+                // so give it a moment to catch up before calling it a failure.
+                XCTAssertTrue(
+                    waitUntil(timeout: 0.5) {
+                        footer.frame.maxY <= self.panel(app).frame.maxY + 1
+                    },
+                    "card \(i) stayed outside the window while scrolling"
                 )
             }
         }
 
         XCTAssertTrue(
             waitUntil(timeout: 6) { footers.firstMatch.frame.origin.y > firstFooterYBefore + 20 },
-            "cards never caught up after the scroll settled (footer y \(firstFooterYBefore) -> \(footers.firstMatch.frame.origin.y))"
+            "cards never grew with the stream (footer y \(firstFooterYBefore) -> \(footers.firstMatch.frame.origin.y))"
         )
+    }
+
+    /// The panel's top edge never moves on its own. Long results extend the
+    /// bottom; when that reaches the screen's bottom margin the panel stops
+    /// growing (bodies scroll instead) rather than sliding up, which used to
+    /// drag the whole window — and the text being read — upward mid-stream.
+    func testPanelTopStaysPutWhileResultsGrow() {
+        let app = launch(seed: "top pinned")
+        let topBefore = panel(app).frame.origin.y
+        XCTAssertGreaterThan(panel(app).frame.height, 0)
+
+        // Same panel, now with three long results: as much growth as it can get.
+        let grown = launch(seed: "top pinned", results: 3)
+        XCTAssertTrue(waitUntil(timeout: 3) { self.panel(grown).frame.height > 400 },
+                      "results never grew the panel")
+        XCTAssertEqual(panel(grown).frame.origin.y, topBefore, accuracy: 2,
+                       "the panel's top edge moved while the content grew")
+
+        // XCUI frames are flipped (origin top-left); NSScreen is not. Convert
+        // the visible area's bottom edge before comparing.
+        guard let screen = NSScreen.main else { return }
+        let flippedVisibleBottom = screen.frame.height - screen.visibleFrame.minY
+        XCTAssertLessThanOrEqual(panel(grown).frame.maxY, flippedVisibleBottom - 24 + 1,
+                                 "the panel grew past the screen's bottom margin")
+    }
+
+    /// The divider above a card's footer sets how tall that card may get: drag
+    /// it up and the card (and the window) shrink to match; double-click and it
+    /// goes back to following the content.
+    func testDraggingTheDividerSetsTheCardsMaximumHeight() {
+        // Long result, so the card fills its share and there is height to take
+        // away — the drag is a ceiling, so it can only shrink a filled card.
+        let app = launch(seed: "resize", results: 1)
+        let footer = app.buttons.matching(identifier: "result.copy").firstMatch
+        XCTAssertTrue(footer.waitForExistence(timeout: 10))
+        let panelHeightBefore = panel(app).frame.height
+        let footerYBefore = footer.frame.origin.y
+
+        dragVertically(from: CGPoint(x: footer.frame.midX, y: footerYBefore - 8), by: -120)
+
+        XCTAssertTrue(
+            waitUntil(timeout: 3) { footer.frame.origin.y < footerYBefore - 60 },
+            "dragging the divider up did not shrink the card (footer y \(footerYBefore) -> \(footer.frame.origin.y))"
+        )
+        XCTAssertLessThan(
+            panel(app).frame.height, panelHeightBefore - 60,
+            "the window did not follow the shrunken card"
+        )
+
+        // Double-click the divider (now higher, with the footer) to reset. This
+        // also clears the preference this test just persisted.
+        doubleClick(at: CGPoint(x: footer.frame.midX, y: footer.frame.origin.y - 8))
+        XCTAssertTrue(
+            waitUntil(timeout: 3) { abs(self.panel(app).frame.height - panelHeightBefore) < 12 },
+            "double-click did not restore the automatic height (panel \(panel(app).frame.height), expected ~\(panelHeightBefore))"
+        )
+    }
+
+    /// Press, move in steps, release — as real HID events, since SwiftUI gestures
+    /// never see `XCUIElement`'s synthesized ones.
+    private func dragVertically(from start: CGPoint, by dy: CGFloat) {
+        post(.leftMouseDown, at: start)
+        let steps = 10
+        for i in 1...steps {
+            post(.leftMouseDragged, at: CGPoint(x: start.x, y: start.y + dy * CGFloat(i) / CGFloat(steps)))
+            usleep(20_000)
+        }
+        post(.leftMouseUp, at: CGPoint(x: start.x, y: start.y + dy))
+    }
+
+    private func doubleClick(at point: CGPoint) {
+        for _ in 0..<2 {
+            post(.leftMouseDown, at: point)
+            post(.leftMouseUp, at: point)
+            usleep(40_000)
+        }
+    }
+
+    private func post(_ type: CGEventType, at point: CGPoint) {
+        guard let event = CGEvent(
+            mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left
+        ) else { return }
+        if type == .leftMouseDown || type == .leftMouseUp {
+            // A double-click needs both presses to carry the click count.
+            event.setIntegerValueField(.mouseEventClickState, value: 1)
+        }
+        event.post(tap: .cghidEventTap)
+        usleep(10_000)
     }
 
     /// One scroll-up tick over the middle of `frame`, as a real HID event.

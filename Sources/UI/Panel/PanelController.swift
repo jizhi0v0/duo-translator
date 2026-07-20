@@ -85,10 +85,6 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// Floor for content-driven fit. Kept low so the empty / no-result state
     /// pulls in tight instead of leaving a blank block under the placeholder.
     private static let minFittedHeight: CGFloat = 220
-    /// Hard ceiling for content-driven growth (input, card count, expanded
-    /// thinking, and page mode). Past it the result bodies scroll internally
-    /// instead of growing further.
-    private static let maxHeight: CGFloat = 820
     /// Margin kept above and below the panel when it fills a tall screen.
     private static let screenPadding: CGFloat = 24
     /// Floor for the result-list budget (space left for cards after chrome), so
@@ -382,7 +378,11 @@ final class PanelController: NSObject, NSWindowDelegate {
         guard let visible = screen?.visibleFrame else { return }
 
         let size = Self.defaultSize
-        let topY = visible.maxY - visible.height * 0.16 // top edge ~16% down
+        // Top edge ~8% down. The panel's growth ceiling is the room *below* this
+        // edge (the top never moves once placed), so opening higher is what buys
+        // the cards their height: at 16% two providers capped around 11 lines
+        // each, at 8% around 13.
+        let topY = visible.maxY - visible.height * 0.08
         let origin = NSPoint(
             x: visible.midX - size.width / 2,
             y: topY - size.height
@@ -391,23 +391,33 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     /// Size the panel to fit `chrome + result` content, grow and shrink, with
-    /// the **top edge pinned**. Results stream in by extending the bottom edge
-    /// downward while the input stays put; collapsing/expanding a card likewise
-    /// only moves the bottom, so the header stays under the pointer. This avoids
-    /// the window jumping around (a centered fit repositions on every change).
-    /// Past the ceiling the result body scrolls internally instead of growing.
+    /// the **top edge pinned** — including at the screen's bottom edge, where
+    /// growth stops rather than sliding the window up. Results stream in by
+    /// extending the bottom edge downward while the input stays put;
+    /// collapsing/expanding a card likewise only moves the bottom, so the header
+    /// stays under the pointer. Past the ceiling the bodies scroll internally.
     private func refit(display: Bool = true) {
         guard panel.isVisible, !panel.inLiveResize else { return }
         guard let screen = panel.screen ?? NSScreen.main else { return }
 
         let visible = screen.visibleFrame
-        let ceiling = min(Self.maxHeight, visible.height - Self.screenPadding * 2)
+        // The ceiling is the room below the panel's current top edge, not the
+        // whole screen: the top stays exactly where it is and growth extends the
+        // bottom. Using the full screen height meant a panel that grew past the
+        // bottom margin got slid up to fit, so the top drifted while reading.
+        // Growth stops at the bottom margin instead and the bodies scroll.
+        // (There used to be a fixed 820pt ceiling on top of this. With a card
+        // height the user can drag and keep, a constant only got in the way.)
+        let roomBelowTop = panel.frame.maxY - visible.minY - Self.screenPadding
+        let ceiling = max(
+            Self.minFittedHeight,
+            min(visible.height - Self.screenPadding * 2, roomBelowTop)
+        )
 
-        // Publish how much height is actually left for the result list at this
-        // ceiling given the current chrome. The result cards cap their bodies to
-        // this, so a tall input shrinks the cards (they scroll internally) and
-        // the total always fits the window — instead of the bottom card being
-        // pushed off-screen with no reachable scrollbar.
+        // Publish how much height is left for the result list at that ceiling
+        // given the current chrome. Cards cap their bodies to it, so a tall
+        // input shrinks them (they scroll internally) instead of pushing the
+        // bottom card off-screen with no reachable scrollbar.
         let budget = max(Self.minResultBudget, ceiling - chromeHeightMeasured - Self.fitBuffer)
         if abs(budget - viewModel.resultAreaBudget) > 1 {
             viewModel.resultAreaBudget = budget
@@ -439,7 +449,9 @@ final class PanelController: NSObject, NSWindowDelegate {
         frame.size.height = desired
         frame.origin.y = topY - desired
 
-        // Keep the panel fully on screen; if growing past the bottom, slide up.
+        // Safety net only: the ceiling already keeps growth above the bottom
+        // margin, so this can fire just for a panel sitting lower than one
+        // minimum-height window (e.g. dragged to the very bottom edge).
         if frame.minY < visible.minY + Self.screenPadding {
             frame.origin.y = visible.minY + Self.screenPadding
         }
@@ -555,5 +567,26 @@ enum PanelLayout {
         // clean line boundary rather than slicing a line in half.
         let ceiling = lineAlignedBodyHeight(atMost: cap)
         return Swift.min(Swift.max(measured, base), ceiling)
+    }
+
+    /// Body height with a user-dragged height taken into account.
+    ///
+    /// The dragged value is a *ceiling*, not a fixed height: the body still
+    /// follows its content, it just stops there. Treating it as fixed meant
+    /// every later short translation sat in a tall box of empty space, and the
+    /// height had to be reset by hand to get rid of it.
+    static func bodyHeight(
+        dragged: CGFloat?, measured: CGFloat?, floor: CGFloat, cap: CGFloat
+    ) -> CGFloat {
+        let ceiling = Swift.min(dragged ?? cap, cap)
+        return growingBodyHeight(measured: measured, floor: floor, cap: ceiling)
+    }
+
+    /// A drag in progress, clamped to what the window can actually give: never
+    /// below one line, never past this card's share of the result area.
+    static func clampDraggedBodyHeight(_ height: CGFloat, floor: CGFloat, cap: CGFloat) -> CGFloat {
+        let low = stableBodyHeight(preferred: floor, cap: cap)
+        let high = lineAlignedBodyHeight(atMost: cap)
+        return Swift.min(Swift.max(height, low), Swift.max(low, high))
     }
 }
