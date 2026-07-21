@@ -27,7 +27,7 @@ enum VisionOCRRequest {
         }
     }
 
-    static func parse(kind: EngineKind, data: Data) throws -> String {
+    static func parse(kind: ProviderKind, data: Data) throws -> String {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw EngineError.decoding("无法解析响应")
         }

@@ -7,13 +7,15 @@ final class VisionOCRRequestTests: XCTestCase {
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
+    /// A resolved OCR engine: a provider (connection) plus the OCR model.
+    private func profile(kind: ProviderKind, baseURL: String = "", model: String = "") -> EngineProfile {
+        EngineProfile(provider: Provider(kind: kind, name: "x", baseURL: baseURL), model: model)
+    }
+
     // MARK: - OpenAI-compatible (gpt-4o vision)
 
     func testOpenAIRequestShape() throws {
-        let profile = EngineProfile(
-            kind: .openAICompat, name: "OpenAI",
-            baseURL: "https://api.openai.com/v1", model: "gpt-4o"
-        )
+        let profile = profile(kind: .openAICompat, baseURL: "https://api.openai.com/v1", model: "gpt-4o")
         let request = try VisionOCRRequest.build(profile: profile, apiKey: "sk-test", base64PNG: "AAAA")
 
         XCTAssertEqual(request.url?.absoluteString, "https://api.openai.com/v1/chat/completions")
@@ -37,7 +39,7 @@ final class VisionOCRRequestTests: XCTestCase {
     }
 
     func testOpenAITrailingSlashBaseURL() throws {
-        let profile = EngineProfile(kind: .openAICompat, name: "x", baseURL: "https://host/v1/", model: "m")
+        let profile = profile(kind: .openAICompat, baseURL: "https://host/v1/", model: "m")
         let request = try VisionOCRRequest.build(profile: profile, apiKey: "k", base64PNG: "z")
         XCTAssertEqual(request.url?.absoluteString, "https://host/v1/chat/completions")
     }
@@ -51,10 +53,7 @@ final class VisionOCRRequestTests: XCTestCase {
     // MARK: - Anthropic (Claude vision)
 
     func testAnthropicRequestShape() throws {
-        let profile = EngineProfile(
-            kind: .anthropic, name: "Claude",
-            baseURL: "https://api.anthropic.com", model: "claude-haiku-4-5"
-        )
+        let profile = profile(kind: .anthropic, baseURL: "https://api.anthropic.com", model: "claude-haiku-4-5")
         let request = try VisionOCRRequest.build(profile: profile, apiKey: "ak", base64PNG: "BBBB")
 
         XCTAssertEqual(request.url?.absoluteString, "https://api.anthropic.com/v1/messages")
@@ -75,7 +74,7 @@ final class VisionOCRRequestTests: XCTestCase {
     }
 
     func testAnthropicV1SuffixNotDoubled() throws {
-        let profile = EngineProfile(kind: .anthropic, name: "x", baseURL: "https://host/v1", model: "m")
+        let profile = profile(kind: .anthropic, baseURL: "https://host/v1", model: "m")
         let request = try VisionOCRRequest.build(profile: profile, apiKey: "k", base64PNG: "z")
         XCTAssertEqual(request.url?.absoluteString, "https://host/v1/messages")
     }
@@ -89,7 +88,7 @@ final class VisionOCRRequestTests: XCTestCase {
     // MARK: - Unsupported kinds & bad payloads
 
     func testUnsupportedKindThrows() {
-        let profile = EngineProfile(kind: .deepL, name: "DeepL")
+        let profile = profile(kind: .deepL)
         XCTAssertThrowsError(try VisionOCRRequest.build(profile: profile, apiKey: "k", base64PNG: "z"))
     }
 

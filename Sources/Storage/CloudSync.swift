@@ -21,6 +21,12 @@ final class CloudSync {
     static let syncedKeys: [String] = [
         SettingsStore.Keys.firstLanguage,
         SettingsStore.Keys.secondLanguage,
+        SettingsStore.Keys.providers,
+        SettingsStore.Keys.translationConfigs,
+        SettingsStore.Keys.ocrProviderID,
+        SettingsStore.Keys.ocrModel,
+        // Legacy keys kept in the mirror during the transition so a device still
+        // on the old build round-trips; the one-time migration is idempotent.
         SettingsStore.Keys.engineProfiles,
         SettingsStore.Keys.ocrLanguages,
         SettingsStore.Keys.ocrMergesLines,

@@ -1,10 +1,10 @@
 import CoreGraphics
 import Foundation
 
-/// OCR via a vision-capable LLM, reusing a configured translation engine's
-/// profile (base URL / model) and its keychain API key. Single-shot: the result
-/// only prefills the input box, so there's no streaming UI to feed — a plain
-/// POST + one JSON parse is simpler and needs no SSE plumbing.
+/// OCR via a vision-capable LLM, resolved from the OCR-selected `Provider`
+/// (base URL) plus the OCR model, with the provider's keychain API key.
+/// Single-shot: the result only prefills the input box, so there's no streaming
+/// UI to feed — a plain POST + one JSON parse is simpler and needs no SSE plumbing.
 struct LLMVisionOCRProvider: OCRProvider {
     let profile: EngineProfile
     let apiKey: String

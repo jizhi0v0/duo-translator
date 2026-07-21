@@ -146,17 +146,18 @@ final class AppCoordinator {
             return
         }
         let settings = SettingsStore.shared
-        guard var profile = settings.engineProfiles.first(where: { $0.kind == .openAICompat }) else {
-            Log.app.error("ocrTest: 没有 openAICompat 引擎")
+        guard let provider = settings.providers.first(where: { $0.kind == .openAICompat }) else {
+            Log.app.error("ocrTest: 没有 openAICompat 供应商")
             return
         }
-        if let model, !model.isEmpty { profile.model = model }
-        let key = KeychainStore.shared.secret(for: profile.id) ?? ""
-        Log.app.error("ocrTest: 引擎=\(profile.name, privacy: .public) model=\(profile.model, privacy: .public) keyLen=\(key.count)")
+        let ocrModel = (model?.isEmpty == false) ? model! : settings.ocrModel
+        let profile = EngineProfile(provider: provider, model: ocrModel)
+        let key = KeychainStore.shared.secret(for: provider.id) ?? ""
+        Log.app.error("ocrTest: 供应商=\(provider.name, privacy: .public) model=\(profile.model, privacy: .public) keyLen=\(key.count)")
 
-        let provider = LLMVisionOCRProvider(profile: profile, apiKey: key)
+        let ocr = LLMVisionOCRProvider(profile: profile, apiKey: key)
         do {
-            let text = try await provider.recognize(image)
+            let text = try await ocr.recognize(image)
             Log.app.error("ocrTest: 成功 \(text.count) 字 → \(text, privacy: .public)")
         } catch {
             Log.app.error("ocrTest: 失败 → \(error.localizedDescription, privacy: .public)")

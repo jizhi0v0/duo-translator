@@ -1,65 +1,141 @@
 import XCTest
 @testable import DuoTranslator
 
+/// Covers the provider/config data model and the one-time migration from the
+/// legacy flat `engineProfiles` shape.
 final class EngineProfileTests: XCTestCase {
-    func testNormalizeStripsPastedWhitespace() {
-        var profile = EngineProfile(kind: .openAICompat, name: "  OpenAI\n",
-                                    baseURL: " https://api.openai.com/v1 ", model: "gpt-5.6-terra\n")
-        profile.normalize()
-        XCTAssertEqual(profile.name, "OpenAI")
-        XCTAssertEqual(profile.baseURL, "https://api.openai.com/v1")
-        XCTAssertEqual(profile.model, "gpt-5.6-terra")
+    // MARK: - Normalization & tolerant decoding
+
+    func testProviderNormalizeStripsPastedWhitespace() {
+        var provider = Provider(kind: .openAICompat, name: "  OpenAI\n",
+                                baseURL: " https://api.openai.com/v1 ")
+        provider.normalize()
+        XCTAssertEqual(provider.name, "OpenAI")
+        XCTAssertEqual(provider.baseURL, "https://api.openai.com/v1")
+    }
+
+    func testConfigNormalizeStripsPastedWhitespace() {
+        var config = TranslationConfig(providerID: UUID(), name: "  Card\n", model: "gpt-5.6-terra\n")
+        config.normalize()
+        XCTAssertEqual(config.name, "Card")
+        XCTAssertEqual(config.model, "gpt-5.6-terra")
     }
 
     @MainActor
-    func testStoreNormalizesOnAssignment() {
-        let defaults = UserDefaults(suiteName: "EngineProfileTests")!
-        defaults.removePersistentDomain(forName: "EngineProfileTests")
-        let store = SettingsStore(defaults: defaults)
-        var profile = EngineProfile.makeDefault(kind: .openAICompat)
-        profile.model = "gpt-5.6-terra\n"
-        store.engineProfiles = [profile]
-        XCTAssertEqual(store.engineProfiles.first?.model, "gpt-5.6-terra")
+    func testStoreNormalizesConfigOnAssignment() {
+        let store = freshStore("StoreNormalizesConfig")
+        let providerID = store.providers.first!.id
+        store.translationConfigs = [TranslationConfig(providerID: providerID, name: "x", model: "gpt-5.6-terra\n")]
+        XCTAssertEqual(store.translationConfigs.first?.model, "gpt-5.6-terra")
     }
 
-    /// Regression: a profile saved before a field existed must still decode.
-    /// Swift's synthesized `Decodable` throws `keyNotFound` rather than using
-    /// the property's default, so adding one persisted field made every stored
-    /// engine unreadable — the store fell back to a fresh default profile whose
-    /// id no longer matched the keychain, and a configured app reported
-    /// "未配置 API Key".
-    func testProfileSavedBeforeThePriceFieldsStillDecodes() throws {
+    /// Regression: a value saved before a field existed must still decode.
+    /// Swift's synthesized `Decodable` throws `keyNotFound` rather than using the
+    /// property default, so a single added persisted field would otherwise make
+    /// the whole store unreadable and reset — losing the id the keychain is
+    /// filed under.
+    func testConfigSavedBeforeThePriceFieldsStillDecodes() throws {
         let legacy = Data("""
-        [{"id":"53E6F006-D96F-495D-805C-F1D2DFB1C00D","kind":"openAICompat","name":"OpenAI",
-          "enabled":true,"baseURL":"https://api.openai.com/v1","model":"gpt-4o-mini",
-          "systemPromptTemplate":"translate"}]
+        [{"id":"53E6F006-D96F-495D-805C-F1D2DFB1C00D","providerID":"53E6F006-D96F-495D-805C-F1D2DFB1C00D",
+          "name":"OpenAI","enabled":true,"model":"gpt-4o-mini","systemPromptTemplate":"translate"}]
         """.utf8)
-
-        let profiles = try JSONDecoder().decode([EngineProfile].self, from: legacy)
-        XCTAssertEqual(profiles.count, 1)
-        XCTAssertEqual(profiles[0].id.uuidString, "53E6F006-D96F-495D-805C-F1D2DFB1C00D",
-                       "the id must survive — the keychain secret is filed under it")
-        XCTAssertEqual(profiles[0].model, "gpt-4o-mini")
-        XCTAssertEqual(profiles[0].inputPricePerMTok, 0, "an absent price reads as unknown")
-        XCTAssertEqual(profiles[0].cachedInputPricePerMTok, 0)
+        let configs = try JSONDecoder().decode([TranslationConfig].self, from: legacy)
+        XCTAssertEqual(configs.count, 1)
+        XCTAssertEqual(configs[0].id.uuidString, "53E6F006-D96F-495D-805C-F1D2DFB1C00D")
+        XCTAssertEqual(configs[0].model, "gpt-4o-mini")
+        XCTAssertEqual(configs[0].inputPricePerMTok, 0, "an absent price reads as unknown")
     }
 
-    func testOnlyKindAndNameAreRequired() throws {
-        let minimal = Data(#"{"kind":"apple","name":"Apple 翻译"}"#.utf8)
-        let profile = try JSONDecoder().decode(EngineProfile.self, from: minimal)
-        XCTAssertEqual(profile.name, "Apple 翻译")
-        XCTAssertTrue(profile.enabled, "defaults fill in for everything else")
-        XCTAssertEqual(profile.systemPromptTemplate, EngineProfile.defaultPromptTemplate)
+    func testProviderOnlyKindAndNameAreRequired() throws {
+        let minimal = Data(#"{"kind":"apple","name":"Apple 本地"}"#.utf8)
+        let provider = try JSONDecoder().decode(Provider.self, from: minimal)
+        XCTAssertEqual(provider.name, "Apple 本地")
+        XCTAssertEqual(provider.baseURL, "", "defaults fill in for everything else")
     }
 
-    func testRoundTripKeepsPrices() throws {
-        var profile = EngineProfile.makeDefault(kind: .openAICompat)
-        profile.inputPricePerMTok = 3
-        profile.outputPricePerMTok = 15
-        profile.cachedInputPricePerMTok = 0.3
+    func testConfigRoundTripKeepsPrices() throws {
+        var config = TranslationConfig(providerID: UUID(), name: "x", model: "m")
+        config.inputPricePerMTok = 3
+        config.outputPricePerMTok = 15
+        config.cachedInputPricePerMTok = 0.3
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(TranslationConfig.self, from: data)
+        XCTAssertEqual(decoded, config)
+    }
 
-        let data = try JSONEncoder().encode(profile)
-        let decoded = try JSONDecoder().decode(EngineProfile.self, from: data)
-        XCTAssertEqual(decoded, profile)
+    // MARK: - Legacy migration
+
+    @MainActor
+    func testMigratesLegacyEngineProfilesPreservingIDs() {
+        let defaults = suite("MigrateLegacy")
+        let id = "53E6F006-D96F-495D-805C-F1D2DFB1C00D"
+        defaults.set(Data("""
+        [{"id":"\(id)","kind":"openAICompat","name":"OpenAI","enabled":true,
+          "baseURL":"https://api.openai.com/v1","model":"gpt-4o-mini",
+          "systemPromptTemplate":"translate","inputPricePerMTok":3}]
+        """.utf8), forKey: SettingsStore.Keys.engineProfiles)
+
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertEqual(store.providers.count, 1)
+        XCTAssertEqual(store.providers.first?.id.uuidString, id,
+                       "provider keeps the id — the keychain secret is filed under it")
+        XCTAssertEqual(store.providers.first?.baseURL, "https://api.openai.com/v1")
+        XCTAssertEqual(store.translationConfigs.count, 1)
+        XCTAssertEqual(store.translationConfigs.first?.id.uuidString, id,
+                       "card keeps the id — per-card layout is keyed by it")
+        XCTAssertEqual(store.translationConfigs.first?.providerID.uuidString, id)
+        XCTAssertEqual(store.translationConfigs.first?.model, "gpt-4o-mini")
+        XCTAssertEqual(store.translationConfigs.first?.inputPricePerMTok, 3)
+        XCTAssertEqual(store.resolvedEnabledEngines.count, 1)
+    }
+
+    @MainActor
+    func testMigratesLegacyOCRSelectionAndModel() {
+        let defaults = suite("MigrateLegacyOCR")
+        let id = "53E6F006-D96F-495D-805C-F1D2DFB1C00D"
+        defaults.set(Data("""
+        [{"id":"\(id)","kind":"openAICompat","name":"OpenAI","enabled":true,
+          "baseURL":"https://h/v1","model":"gpt-4o"}]
+        """.utf8), forKey: SettingsStore.Keys.engineProfiles)
+        defaults.set(id, forKey: SettingsStore.Keys.ocrProvider)
+
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertEqual(store.ocrProviderID, id, "OCR now points at the migrated provider")
+        XCTAssertEqual(store.ocrModel, "gpt-4o", "OCR carries over the model it used to share")
+    }
+
+    @MainActor
+    func testLegacyAppleOCRMapsToBuiltIn() {
+        let defaults = suite("MigrateLegacyApple")
+        defaults.set(Data("""
+        [{"id":"53E6F006-D96F-495D-805C-F1D2DFB1C00D","kind":"apple","name":"Apple","enabled":true}]
+        """.utf8), forKey: SettingsStore.Keys.engineProfiles)
+        defaults.set("apple", forKey: SettingsStore.Keys.ocrProvider)
+
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertEqual(store.ocrProviderID, "", "Apple built-in Vision is the empty sentinel")
+    }
+
+    @MainActor
+    func testFreshInstallSeedsOneProviderAndCard() {
+        let store = freshStore("FreshSeed")
+        XCTAssertEqual(store.providers.count, 1)
+        XCTAssertEqual(store.providers.first?.kind, .openAICompat)
+        XCTAssertEqual(store.translationConfigs.count, 1)
+        XCTAssertEqual(store.translationConfigs.first?.providerID, store.providers.first?.id)
+        XCTAssertEqual(store.ocrProviderID, "")
+    }
+
+    // MARK: - Helpers
+
+    private func suite(_ name: String) -> UserDefaults {
+        let defaults = UserDefaults(suiteName: "EngineProfileTests.\(name)")!
+        defaults.removePersistentDomain(forName: "EngineProfileTests.\(name)")
+        return defaults
+    }
+
+    @MainActor
+    private func freshStore(_ name: String) -> SettingsStore {
+        SettingsStore(defaults: suite(name))
     }
 }

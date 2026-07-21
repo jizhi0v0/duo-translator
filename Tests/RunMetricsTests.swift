@@ -82,10 +82,10 @@ final class RunMetricsTests: XCTestCase {
     }
 
     func testNoPricesMeansNoCostRatherThanZero() {
-        var profile = EngineProfile.makeDefault(kind: .openAICompat)
-        profile.inputPricePerMTok = 0
-        profile.outputPricePerMTok = 0
-        XCTAssertNil(EnginePricing(profile: profile))
+        let provider = Provider(kind: .openAICompat, name: "x", baseURL: "https://h/v1")
+        let config = TranslationConfig(providerID: provider.id, name: "x", model: "m")
+        let profile = EngineProfile(provider: provider, config: config)
+        XCTAssertNil(EnginePricing(profile: profile), "prices default to 0 = unknown")
 
         let m = RunMetrics.make(
             total: 2, ttft: 0.5, outputChars: 10,

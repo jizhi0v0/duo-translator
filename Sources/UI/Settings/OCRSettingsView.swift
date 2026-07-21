@@ -3,32 +3,36 @@ import SwiftUI
 struct OCRSettingsView: View {
     @ObservedObject var settings: SettingsStore
 
+    /// Sentinel picker tag for the built-in Apple Vision path (stored as an
+    /// empty `ocrProviderID`).
+    private static let appleTag = ""
+
     /// Vision recognition language options.
     private static let choices: [String] = [
         "zh-Hans", "zh-Hant", "en-US", "ja", "ko", "fr-FR", "de-DE", "es-ES", "ru-RU", "pt-BR", "it-IT",
     ]
 
-    /// Vision-capable engines the user has configured, offered as OCR backends.
-    private var llmProfiles: [EngineProfile] {
-        settings.engineProfiles.filter { $0.kind.isLLM }
+    /// Vision-capable providers offered as LLM OCR backends.
+    private var llmProviders: [Provider] {
+        settings.providers.filter { $0.kind.isLLM }
     }
 
-    private var isApple: Bool { settings.ocrProvider == OCRFactory.appleSelection }
+    private var isApple: Bool { selectedProvider == nil }
 
-    /// The selected LLM engine, when one is chosen (nil for Apple or a stale id).
-    private var selectedLLM: EngineProfile? {
-        guard !isApple, let id = UUID(uuidString: settings.ocrProvider) else { return nil }
-        return llmProfiles.first { $0.id == id }
+    /// The selected LLM provider, when one is chosen (nil for Apple or a stale id).
+    private var selectedProvider: Provider? {
+        guard let id = UUID(uuidString: settings.ocrProviderID) else { return nil }
+        return llmProviders.first { $0.id == id }
     }
 
     var body: some View {
         Form {
             Section("识别引擎") {
-                Picker("引擎", selection: $settings.ocrProvider) {
+                Picker("引擎", selection: $settings.ocrProviderID) {
                     Label("Apple 内置（离线免费）", systemImage: "apple.logo")
-                        .tag(OCRFactory.appleSelection)
-                    ForEach(llmProfiles) { profile in
-                        Text(profile.name).tag(profile.id.uuidString)
+                        .tag(Self.appleTag)
+                    ForEach(llmProviders) { provider in
+                        Text(provider.name).tag(provider.id.uuidString)
                     }
                 }
 
@@ -42,6 +46,8 @@ struct OCRSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
+                    TextField("视觉模型", text: $settings.ocrModel)
+                        .autocorrectionDisabled()
                     llmStatus
                 }
             }
@@ -72,31 +78,36 @@ struct OCRSettingsView: View {
         .onAppear(perform: normalizeSelection)
     }
 
-    /// Config feedback for the selected vision LLM: reuse the engine list's
-    /// shared check so the warning wording matches the 引擎 page exactly.
+    /// Config feedback for the selected vision provider: reuse the shared
+    /// connection check so the warning wording matches the 供应商 page, and flag
+    /// a missing model (which is OCR-specific, not a provider issue).
     @ViewBuilder private var llmStatus: some View {
-        if let profile = selectedLLM {
-            if let issue = engineConfigIssue(profile) {
+        if let provider = selectedProvider {
+            if let issue = providerConfigIssue(provider) {
                 Label(issue, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .font(.callout)
+            } else if settings.ocrModel.isEmpty {
+                Label("请填写视觉模型（如 gpt-4o、claude-…）。", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.callout)
             } else {
-                Label("将用「\(profile.name)」的视觉模型识别截图。", systemImage: "checkmark.circle.fill")
+                Label("将用「\(provider.name)」的 \(settings.ocrModel) 识别截图。", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.callout)
             }
-            Text("需选用支持图像的模型（如 gpt-4o、Claude）。在「引擎」页配置 key、模型并用「连接测试」验证。")
+            Text("需选用支持图像的模型（如 gpt-4o、Claude）。在「供应商」页配置 key、Base URL 并保证连接可用。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
 
-    /// If the persisted selection points at an engine that's gone (or never was
+    /// If the persisted selection points at a provider that's gone (or never was
     /// an LLM), snap the picker back to Apple so the UI matches the factory's
     /// fallback instead of showing a blank Picker row.
     private func normalizeSelection() {
-        guard !isApple, selectedLLM == nil else { return }
-        settings.ocrProvider = OCRFactory.appleSelection
+        guard !isApple, selectedProvider == nil else { return }
+        settings.ocrProviderID = Self.appleTag
     }
 
     private func binding(for code: String) -> Binding<Bool> {

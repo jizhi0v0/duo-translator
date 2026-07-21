@@ -20,7 +20,7 @@ final class EngineRunModel: ObservableObject, Identifiable {
 
     let id: String
     let name: String
-    let kind: EngineKind
+    let kind: ProviderKind
     let stream = StreamingTextModel()
     /// Reasoning/thinking output (reasoning models only).
     let thinkingStream = StreamingTextModel()
@@ -43,10 +43,10 @@ final class EngineRunModel: ObservableObject, Identifiable {
     /// Model the profile asked for, so the readout can flag a re-route.
     var requestedModel: String = ""
     /// First-token latency + throughput, filled in when the run finishes.
-    /// Shown only for LLM engines (see `EngineKind.isLLM`).
+    /// Shown only for LLM engines (see `ProviderKind.isLLM`).
     @Published var metrics: RunMetrics?
 
-    init(id: String, name: String, kind: EngineKind) {
+    init(id: String, name: String, kind: ProviderKind) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -95,7 +95,7 @@ final class TranslationRunController: ObservableObject {
 
         let request = TranslationRequest(text: trimmed, sourceLanguage: detected, targetLanguage: target)
         lastRequest = request
-        let profiles = settings.enabledProfiles
+        let profiles = settings.resolvedEnabledEngines
         let engines = EngineFactory.makeEngines(settings: settings, keychain: keychain)
 
         runGeneration += 1
@@ -127,7 +127,7 @@ final class TranslationRunController: ObservableObject {
             AppleTranslationBridge.shared.cancelPending()
         }
 
-        guard let profile = SettingsStore.shared.enabledProfiles.first(where: { $0.id.uuidString == runID }) else { return }
+        guard let profile = SettingsStore.shared.resolvedEngine(engineID: runID) else { return }
         let engine = EngineFactory.makeEngine(profile: profile, keychain: .shared)
         let fresh = EngineRunModel(id: old.id, name: old.name, kind: old.kind)
         runs[index] = fresh
@@ -159,7 +159,7 @@ final class TranslationRunController: ObservableObject {
     private func launch(engine: any TranslationEngine, run: EngineRunModel, request: TranslationRequest) {
         // Prices are per profile; resolve once, here, so the metrics builder
         // stays a pure function of what the run reported.
-        let profile = SettingsStore.shared.engineProfiles.first { $0.id.uuidString == run.id }
+        let profile = SettingsStore.shared.resolvedEngine(engineID: run.id)
         let pricing = profile.flatMap(EnginePricing.init(profile:))
         run.requestedModel = profile?.model ?? ""
         let detected = request.sourceLanguage

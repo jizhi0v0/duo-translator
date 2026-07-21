@@ -7,7 +7,7 @@ options:
 packages:
   KeyboardShortcuts:
     url: https://github.com/sindresorhus/KeyboardShortcuts
-    from: "2.0.0"
+    from: "3.0.0"
 
 configFiles:
   Debug: Configs/Debug.xcconfig

@@ -21,7 +21,7 @@ struct MetricsAnchorKey: PreferenceKey {
 struct MetricsPopover: View {
     let metrics: RunMetrics
     let engineName: String
-    let kind: EngineKind
+    let kind: ProviderKind
     /// Model the profile asked for, so a provider that routed elsewhere can be
     /// called out. Empty for engines without a configurable model.
     var requestedModel: String = ""

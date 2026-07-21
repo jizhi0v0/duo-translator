@@ -1,5 +1,4 @@
 import SwiftUI
-import KeyboardShortcuts
 
 struct GeneralSettingsView: View {
     @ObservedObject var settings: SettingsStore
@@ -20,20 +19,6 @@ struct GeneralSettingsView: View {
                 Text("检测到语言 A 的文本会翻译成语言 B，其余翻译成语言 A。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
-struct HotkeySettingsView: View {
-    var body: some View {
-        Form {
-            Section("全局快捷键") {
-                KeyboardShortcuts.Recorder("划词翻译", name: .translateSelection)
-                KeyboardShortcuts.Recorder("输入翻译", name: .openInputWindow)
-                KeyboardShortcuts.Recorder("截图翻译", name: .ocrTranslate)
-                KeyboardShortcuts.Recorder("截图取字", name: .ocrToInput)
             }
         }
         .formStyle(.grouped)

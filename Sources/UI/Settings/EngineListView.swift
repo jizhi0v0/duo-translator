@@ -1,22 +1,21 @@
 import SwiftUI
 
-/// Bob-style engine service list: one row per profile (icon + name + enable
-/// toggle), click to edit, drag to reorder. The list order is the array order
-/// in `SettingsStore.engineProfiles`, which also determines the order of the
-/// result cards in the translation panel.
+/// Translation result cards: one row per `TranslationConfig` (icon + name +
+/// enable toggle), click to edit, drag to reorder. Each card references a
+/// `Provider` (connection) and picks its own model. The list order is the array
+/// order in `SettingsStore.translationConfigs`, which also determines the order
+/// of the result cards in the translation panel.
 struct EngineListView: View {
     @ObservedObject var settings: SettingsStore
-    /// Which engine's detail is open, or nil for the list. We drive navigation
-    /// by hand instead of `NavigationStack`: this view is hosted inside the
-    /// settings window's tab controller, whose toolbar already owns the toolbar
-    /// area, so a `NavigationStack` back button has nowhere to render and the
-    /// user gets stuck on the detail page.
+    /// Which card's detail is open, or nil for the list. Navigation is driven by
+    /// hand rather than `NavigationStack` (see the settings tab controller owns
+    /// the toolbar area, leaving a back button nowhere to render).
     @State private var selectedID: UUID?
 
     var body: some View {
         Group {
             if let id = selectedID,
-               let index = settings.engineProfiles.firstIndex(where: { $0.id == id }) {
+               let index = settings.translationConfigs.firstIndex(where: { $0.id == id }) {
                 detail(index: index)
             } else {
                 listPane
@@ -26,22 +25,20 @@ struct EngineListView: View {
 
     private var listPane: some View {
         VStack(spacing: 0) {
-            if settings.engineProfiles.isEmpty {
+            if settings.translationConfigs.isEmpty {
                 emptyState
             } else {
                 List {
-                    ForEach($settings.engineProfiles) { $profile in
-                        row($profile)
+                    ForEach($settings.translationConfigs) { $config in
+                        row($config)
                             .contentShape(Rectangle())
-                            .onTapGesture { selectedID = profile.id }
+                            .onTapGesture { selectedID = config.id }
                             .contextMenu {
-                                Button("删除", role: .destructive) {
-                                    remove(id: profile.id)
-                                }
+                                Button("删除", role: .destructive) { remove(id: config.id) }
                             }
                     }
                     .onMove { from, to in
-                        settings.engineProfiles.move(fromOffsets: from, toOffset: to)
+                        settings.translationConfigs.move(fromOffsets: from, toOffset: to)
                     }
                 }
                 .listStyle(.inset)
@@ -54,12 +51,12 @@ struct EngineListView: View {
 
     private var emptyState: some View {
         VStack(spacing: 6) {
-            Image(systemName: "engine.combustion")
+            Image(systemName: "rectangle.stack.badge.plus")
                 .font(.largeTitle)
                 .foregroundStyle(.tertiary)
-            Text("还没有翻译引擎")
+            Text("还没有翻译卡片")
                 .foregroundStyle(.secondary)
-            Text("点左下角 + 添加一个引擎")
+            Text(settings.providers.isEmpty ? "请先在「供应商」添加一个供应商" : "点左下角 + 用某个供应商添加卡片")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
@@ -72,21 +69,21 @@ struct EngineListView: View {
                 Button {
                     selectedID = nil
                 } label: {
-                    Label("引擎", systemImage: "chevron.left")
+                    Label("卡片", systemImage: "chevron.left")
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)
 
                 Spacer()
 
-                Text(settings.engineProfiles[index].name)
+                Text(settings.translationConfigs[index].name)
                     .font(.headline)
                     .lineLimit(1)
 
                 Spacer()
 
                 Button(role: .destructive) {
-                    let id = settings.engineProfiles[index].id
+                    let id = settings.translationConfigs[index].id
                     selectedID = nil
                     remove(id: id)
                 } label: {
@@ -94,43 +91,47 @@ struct EngineListView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.red)
-                .help("删除此引擎")
+                .help("删除此卡片")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
 
             Divider()
 
-            EngineProfileDetailView(profile: $settings.engineProfiles[index])
+            TranslationConfigDetailView(settings: settings, config: $settings.translationConfigs[index])
         }
     }
 
-    private func row(_ profile: Binding<EngineProfile>) -> some View {
-        let p = profile.wrappedValue
+    private func row(_ config: Binding<TranslationConfig>) -> some View {
+        let c = config.wrappedValue
+        let provider = settings.provider(id: c.providerID)
         return HStack(spacing: 10) {
-            EngineIcon(kind: p.kind, size: 18)
-                .foregroundStyle(p.enabled ? Color.accentColor : Color.secondary)
-                .frame(width: 24)
+            Group {
+                if let provider {
+                    EngineIcon(kind: provider.kind, size: 18)
+                        .foregroundStyle(c.enabled ? Color.accentColor : Color.secondary)
+                } else {
+                    Image(systemName: "questionmark.circle").resizable().scaledToFit().frame(width: 18, height: 18)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .frame(width: 24)
             VStack(alignment: .leading, spacing: 1) {
-                Text(p.name)
-                Text(p.kind.label)
+                Text(c.name)
+                Text(subtitle(config: c, provider: provider))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
-            // Warn a new user that an enabled engine won't run as configured —
-            // the default OpenAI profile ships without a key and would otherwise
-            // fail silently at translate time.
-            if p.enabled, let issue = engineConfigIssue(p) {
+            if c.enabled, let issue = translationConfigIssue(config: c, provider: provider) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .help(issue)
             }
             Spacer()
-            Toggle("", isOn: profile.enabled)
+            Toggle("", isOn: config.enabled)
                 .toggleStyle(.switch)
                 .controlSize(.small)
                 .labelsHidden()
-            // Tap affordance now that the row isn't a NavigationLink.
             Image(systemName: "chevron.right")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
@@ -138,18 +139,34 @@ struct EngineListView: View {
         .padding(.vertical, 3)
     }
 
+    private func subtitle(config: TranslationConfig, provider: Provider?) -> String {
+        guard let provider else { return "供应商已删除" }
+        if provider.kind.isLLM, !config.model.isEmpty {
+            return "\(provider.name) · \(config.model)"
+        }
+        return provider.name
+    }
+
     private var bottomBar: some View {
         HStack(spacing: 4) {
             Menu {
-                ForEach(EngineKind.allCases, id: \.self) { kind in
-                    Button(kind.label) { addProfile(kind: kind) }
+                if settings.providers.isEmpty {
+                    Text("请先在「供应商」添加供应商")
+                } else {
+                    ForEach(settings.providers) { provider in
+                        Button {
+                            addCard(provider: provider)
+                        } label: {
+                            Label(provider.name, systemImage: "plus")
+                        }
+                    }
                 }
             } label: {
                 Image(systemName: "plus")
             }
             .menuStyle(.borderlessButton)
             .frame(width: 28)
-            .help("添加引擎")
+            .help("添加翻译卡片")
 
             Spacer()
 
@@ -160,37 +177,50 @@ struct EngineListView: View {
         .padding(6)
     }
 
-    private func addProfile(kind: EngineKind) {
-        settings.engineProfiles.append(EngineProfile.makeDefault(kind: kind))
+    private func addCard(provider: Provider) {
+        let config = TranslationConfig(
+            providerID: provider.id,
+            name: provider.name,
+            model: provider.defaultModel
+        )
+        settings.translationConfigs.append(config)
+        selectedID = config.id
     }
 
     private func remove(id: UUID) {
-        guard let index = settings.engineProfiles.firstIndex(where: { $0.id == id }) else { return }
-        let removed = settings.engineProfiles.remove(at: index)
-        KeychainStore.shared.deleteSecret(for: removed.id)
+        settings.translationConfigs.removeAll { $0.id == id }
+        settings.clearResultBodyHeight(for: id.uuidString)
     }
 }
 
-/// The first thing keeping this engine from running, or nil when it's ready.
-/// Shared by the list warning badge and the detail-view status line so both
-/// agree on what "configured" means.
+/// The first thing keeping this translation card from running, or nil when it's
+/// ready. Shared by the list warning badge and the detail-view status line.
 @MainActor
-func engineConfigIssue(_ profile: EngineProfile) -> String? {
-    switch profile.kind {
+func translationConfigIssue(config: TranslationConfig, provider: Provider?) -> String? {
+    guard let provider else { return "供应商已删除，请重新选择" }
+    if let issue = providerConfigIssue(provider) { return issue }
+    if provider.kind.isLLM, config.model.isEmpty { return "缺少模型" }
+    return nil
+}
+
+/// The first thing keeping this provider from connecting, or nil when its
+/// connection is complete. Model is per-feature, so it is not checked here.
+@MainActor
+func providerConfigIssue(_ provider: Provider) -> String? {
+    switch provider.kind {
     case .apple:
         return nil
     case .deepL:
-        return KeychainStore.shared.hasSecret(for: profile.id) ? nil : "未配置 API Key"
+        return KeychainStore.shared.hasSecret(for: provider.id) ? nil : "未配置 API Key"
     case .openAICompat, .anthropic:
-        if profile.baseURL.isEmpty { return "缺少 Base URL" }
-        if profile.model.isEmpty { return "缺少模型" }
-        if !KeychainStore.shared.hasSecret(for: profile.id) { return "未配置 API Key" }
+        if provider.baseURL.isEmpty { return "缺少 Base URL" }
+        if !KeychainStore.shared.hasSecret(for: provider.id) { return "未配置 API Key" }
         return nil
     }
 }
 
 /// Numeric entry for a per-million-token price. Empty reads as 0, i.e. unknown.
-private struct PriceField: View {
+struct PriceField: View {
     @Binding var value: Double
 
     var body: some View {
@@ -200,7 +230,7 @@ private struct PriceField: View {
     }
 }
 
-extension EngineKind {
+extension ProviderKind {
     /// Bundled monochrome brand logo (Media.xcassets, template-rendered), or nil
     /// to fall back to `symbolName`. Apple uses its official SF Symbol glyph, so
     /// no asset is bundled for it.
@@ -225,11 +255,11 @@ extension EngineKind {
     }
 }
 
-/// The engine's mark, tintable via `foregroundStyle` in both the result cards
-/// and the settings list: a bundled brand logo where we have one, else the SF
+/// The provider's mark, tintable via `foregroundStyle` in both the result cards
+/// and the settings lists: a bundled brand logo where we have one, else the SF
 /// Symbol fallback. Sizes itself to a square so the two render interchangeably.
 struct EngineIcon: View {
-    let kind: EngineKind
+    let kind: ProviderKind
     var size: CGFloat = 13
 
     var body: some View {
@@ -244,13 +274,11 @@ struct EngineIcon: View {
     }
 }
 
-struct EngineProfileDetailView: View {
-    @Binding var profile: EngineProfile
-    @State private var apiKey = ""
-    /// The key value loaded from the keychain in `onAppear`, so `onChange` can
-    /// tell a genuine user edit from the programmatic load and not rewrite the
-    /// same secret (churning iCloud keychain) every time the pane opens.
-    @State private var loadedKey = ""
+/// Editor for one translation card: which provider, model, prompt, pricing —
+/// plus a live connection test that runs the exact resolved engine.
+struct TranslationConfigDetailView: View {
+    @ObservedObject var settings: SettingsStore
+    @Binding var config: TranslationConfig
     @State private var test: TestState = .idle
 
     private enum TestState: Equatable {
@@ -259,55 +287,47 @@ struct EngineProfileDetailView: View {
         case failure(String)
     }
 
+    private var provider: Provider? { settings.provider(id: config.providerID) }
+    private var isLLM: Bool { provider?.kind.isLLM ?? false }
+
     var body: some View {
         Form {
             Section {
-                TextField("名称", text: $profile.name)
-                Toggle("启用", isOn: $profile.enabled)
+                TextField("名称", text: $config.name)
+                Toggle("启用", isOn: $config.enabled)
             }
 
-            if profile.kind == .openAICompat || profile.kind == .anthropic {
-                Section("API") {
-                    TextField("Base URL", text: $profile.baseURL)
-                        .textContentType(.URL)
-                        .autocorrectionDisabled()
-                    TextField("模型", text: $profile.model)
-                        .autocorrectionDisabled()
+            Section("供应商") {
+                if settings.providers.isEmpty {
+                    Label("请先在「供应商」页添加一个供应商。", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.callout)
+                } else {
+                    Picker("供应商", selection: $config.providerID) {
+                        ForEach(settings.providers) { p in
+                            Text(p.name).tag(p.id)
+                        }
+                    }
                 }
             }
 
-            if profile.kind.isLLM {
+            if isLLM {
+                Section("模型") {
+                    TextField("模型", text: $config.model)
+                        .autocorrectionDisabled()
+                }
+
                 // Prices are per model and change often, so they are entered
                 // rather than baked in: a stale built-in table would report
-                // confident, wrong costs. Left at 0, the readout simply omits
-                // cost instead of inventing one.
+                // confident, wrong costs. Left at 0, the readout omits cost.
                 Section("价格（每百万 Token，留空则不显示成本）") {
-                    LabeledContent("输入") {
-                        PriceField(value: $profile.inputPricePerMTok)
-                    }
-                    LabeledContent("输出") {
-                        PriceField(value: $profile.outputPricePerMTok)
-                    }
-                    LabeledContent("缓存输入") {
-                        PriceField(value: $profile.cachedInputPricePerMTok)
-                    }
+                    LabeledContent("输入") { PriceField(value: $config.inputPricePerMTok) }
+                    LabeledContent("输出") { PriceField(value: $config.outputPricePerMTok) }
+                    LabeledContent("缓存输入") { PriceField(value: $config.cachedInputPricePerMTok) }
                 }
-            }
 
-            if profile.kind.needsAPIKey {
-                Section("API Key（存储在钥匙串）") {
-                    SecureField("API Key", text: $apiKey)
-                        .onChange(of: apiKey) {
-                            guard apiKey != loadedKey else { return }
-                            KeychainStore.shared.setSecret(apiKey, for: profile.id)
-                            loadedKey = apiKey
-                        }
-                }
-            }
-
-            if profile.kind == .openAICompat || profile.kind == .anthropic {
                 Section("系统提示词（{{target}} 会替换为目标语言）") {
-                    TextEditor(text: $profile.systemPromptTemplate)
+                    TextEditor(text: $config.systemPromptTemplate)
                         .font(.system(size: 12, design: .monospaced))
                         .frame(minHeight: 90)
                 }
@@ -316,19 +336,14 @@ struct EngineProfileDetailView: View {
             testSection
         }
         .formStyle(.grouped)
-        .onAppear {
-            let existing = KeychainStore.shared.secret(for: profile.id) ?? ""
-            loadedKey = existing
-            apiKey = existing
-        }
     }
 
-    /// Lets a new user confirm the engine actually works before relying on it,
-    /// instead of discovering a bad key or URL only at translate time. Runs one
-    /// real request through the same factory the app uses.
+    /// Lets the user confirm the card actually works before relying on it,
+    /// instead of discovering a bad key/URL/model only at translate time. Runs
+    /// one real request through the same factory the app uses.
     @ViewBuilder private var testSection: some View {
         Section("连接测试") {
-            if let issue = engineConfigIssue(profile) {
+            if let issue = translationConfigIssue(config: config, provider: provider) {
                 Label(issue, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .font(.callout)
@@ -344,7 +359,7 @@ struct EngineProfileDetailView: View {
                         Text("测试连接")
                     }
                 }
-                .disabled(test == .running)
+                .disabled(test == .running || provider == nil)
 
                 switch test {
                 case .success:
@@ -378,9 +393,10 @@ struct EngineProfileDetailView: View {
     }
 
     private func runTest() {
+        guard let provider else { return }
         test = .running
-        let profile = self.profile
-        let target = SettingsStore.shared.firstLanguage
+        let profile = EngineProfile(provider: provider, config: config)
+        let target = settings.firstLanguage
         Task { @MainActor in
             let engine = EngineFactory.makeEngine(profile: profile, keychain: .shared)
             let request = TranslationRequest(

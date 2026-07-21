@@ -6,6 +6,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: StatusItemController!
     private var hotkeys: HotkeyManager!
     private var editKeyMonitor: Any?
+    /// True while a `KeyboardShortcuts.Recorder` is capturing a shortcut. The
+    /// edit-key monitor below must stand down during that window, or it swallows
+    /// the very keystrokes the recorder is trying to capture — ⌘C/⌘V/⌘X/⌘A/⌘Z
+    /// and ⇧⌘Z could never be assigned as shortcuts, and the interception races
+    /// other combos too.
+    private var recorderActive = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Before anything reads settings: a UI-test run must not inherit — or
@@ -20,11 +26,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // exist for ⌘C/⌘V/⌘A/⌘Z key equivalents to reach text fields.
         NSApp.mainMenu = Self.buildMainMenu()
 
+        // While a shortcut recorder is active, let every keystroke through so it
+        // can be captured; KeyboardShortcuts posts this when recording starts and
+        // stops.
+        // `queue: nil` so the flag flips synchronously on the thread that posts
+        // the notification (the main thread, inside the recorder's
+        // become/resign-first-responder). With `.main` the block is enqueued for
+        // the next run-loop turn, leaving a gap where recording has started but
+        // the monitor still intercepts — which ate the first keystrokes and made
+        // recording feel flaky.
+        NotificationCenter.default.addObserver(
+            forName: Notification.Name("KeyboardShortcuts_recorderActiveStatusDidChange"),
+            object: nil, queue: nil
+        ) { [weak self] note in
+            let active = (note.userInfo?["isActive"] as? Bool) ?? false
+            if Thread.isMainThread {
+                self?.recorderActive = active
+            } else {
+                DispatchQueue.main.async { self?.recorderActive = active }
+            }
+        }
+
         // Belt and suspenders: menu key-equivalent routing for accessory apps
         // has been flaky across macOS versions, so intercept the standard edit
         // shortcuts ourselves and dispatch straight to the first responder.
-        editKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            Self.handleEditKeyEquivalent(event) ? nil : event
+        editKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if self?.recorderActive == true { return event }
+            return Self.handleEditKeyEquivalent(event) ? nil : event
         }
 
         coordinator = AppCoordinator()
