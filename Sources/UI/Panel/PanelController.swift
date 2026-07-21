@@ -48,6 +48,9 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     private var panel: TranslatorPanel!
     private var clickMonitor: Any?
+    /// While true, outside clicks don't dismiss the panel — set when the OCR image
+    /// viewer (a separate window) is open so interacting with it can't close this.
+    private var suppressOutsideClose = false
     // Timing instrumentation for the show path (first show pays lazy construction
     // + first SwiftUI/AppKit layout; later shows reuse the panel).
     private var didFirstShow = false
@@ -87,9 +90,6 @@ final class PanelController: NSObject, NSWindowDelegate {
     private static let minFittedHeight: CGFloat = 220
     /// Margin kept above and below the panel when it fills a tall screen.
     private static let screenPadding: CGFloat = 24
-    /// Floor for the result-list budget (space left for cards after chrome), so
-    /// a very tall input still leaves the cards a usable, scrollable minimum.
-    private static let minResultBudget: CGFloat = 200
     /// Small rounding-safety slack added to the fitted height so a sub-pixel
     /// short measurement can't clip the bottom card's footer. Kept minimal: the
     /// content measurement tracks the real rendered height exactly, so anything
@@ -137,7 +137,11 @@ final class PanelController: NSObject, NSWindowDelegate {
         // window itself must be transparent.
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.minSize = NSSize(width: 304, height: 280)
+        // Low hard floor so it never binds: `refit` governs height (its own
+        // `minFittedHeight` keeps normal panels tall; the OCR recognizing state
+        // fits tight to its content with no gap). A higher minSize would pad the
+        // recognizing panel up and leave dead space under the language bar.
+        panel.minSize = NSSize(width: 304, height: 120)
         panel.delegate = self
         panel.onEscape = { [weak self] in self?.close() }
 
@@ -167,6 +171,13 @@ final class PanelController: NSObject, NSWindowDelegate {
         // glass from sitting flush at the top. Clear the safe-area regions so the
         // glass fills to the true top edge.
         hostingView.safeAreaRegions = []
+        // `refit` is the sole authority on the window's size. By default the
+        // hosting view feeds the SwiftUI content's min/intrinsic/max size into the
+        // window's constraints — which clamped the window's minimum height to the
+        // content `minHeight` (≈220), so a tightly-fitted state (e.g. the OCR
+        // recognizing panel with a short chrome) got padded up, leaving a gap
+        // under the language bar. Detach it so `setFrame` fully controls height.
+        hostingView.sizingOptions = []
         panel.contentView = hostingView
     }
 
@@ -270,9 +281,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         defer {
             Log.app.debug("面板: showInput 同步 \(String(format: "%.1f", Date().timeIntervalSince(t0) * 1000), privacy: .public)ms, 首次=\(firstShow, privacy: .public)")
         }
-        // Each fresh presentation starts in the compact card mode; page mode is
-        // an explicit per-session toggle, not a sticky window state.
-        viewModel.pageMode = false
+        // A non-OCR open drops any lingering OCR session so a 划词 / plain-input
+        // panel never shows a stale screenshot attachment.
+        viewModel.ocr = nil
+        viewModel.ocrRecognizing = false
         if let prefill {
             viewModel.inputText = prefill
             // Capture-to-input (取字, no auto translate) starts no run, so the
@@ -286,6 +298,42 @@ final class PanelController: NSObject, NSWindowDelegate {
                 viewModel.clearNotice()
             }
         }
+        presentPanel()
+        if autoTranslate {
+            viewModel.translate()
+        }
+    }
+
+    /// Show the OCR panel immediately (before recognition runs): the captured
+    /// image as a left column with a `.recognizing` right side, the panel widened
+    /// to fit both. Returns the session so the caller fills in text / marks failure
+    /// once `provider.recognize` returns. The recognized text and its translation
+    /// then render in the right column in place — no window switch.
+    func showOCR(cgImage: CGImage) -> OCRSession {
+        viewModel.inputText = ""
+        viewModel.run.clear()
+        viewModel.clearNotice()
+        let session = OCRSession(cgImage: cgImage)
+        viewModel.ocr = session
+        viewModel.ocrRecognizing = true
+        presentPanel()
+        // On the panel's first key activation AppKit auto-selects the (then still
+        // editable) input as first responder, blinking a caret over "识别中…".
+        // Clear it once the disabled state has applied; SwiftUI won't re-focus
+        // because `inputFocused` is false while recognizing.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.viewModel.ocrRecognizing else { return }
+            self.panel.makeFirstResponder(nil)
+        }
+        return session
+    }
+
+    /// Order the panel on screen and fit it to the current content. Shared by the
+    /// input / OCR presentations so both center, key, focus and refit consistently.
+    private func presentPanel() {
+        // Each fresh presentation starts in the compact card mode; page mode is
+        // an explicit per-session toggle, not a sticky window state.
+        viewModel.pageMode = false
         // Only place-and-size from scratch for a genuinely fresh panel. The
         // outside-click monitor orders the panel out (isVisible becomes false)
         // between uses, but its content and fitted size are still there — re-
@@ -305,15 +353,21 @@ final class PanelController: NSObject, NSWindowDelegate {
         // placeholder after clearing) were ignored by `refit`'s visibility
         // guard, so the window could otherwise stay at the wrong height.
         refit()
-        if autoTranslate {
-            viewModel.translate()
-        }
     }
 
     func close() {
         viewModel.run.cancelAll()
+        // Closing the panel ends the OCR session too: drop the image attachment.
+        viewModel.ocr = nil
+        viewModel.ocrRecognizing = false
         removeClickMonitor()
         panel.orderOut(nil)
+    }
+
+    /// Suppress outside-click dismissal while a child window (the OCR image
+    /// viewer) is open, so clicking that window can't close the panel underneath.
+    func setSuppressOutsideClose(_ suppress: Bool) {
+        suppressOutsideClose = suppress
     }
 
     /// Prime the panel at launch-idle: constructing this controller already
@@ -409,17 +463,24 @@ final class PanelController: NSObject, NSWindowDelegate {
         // Growth stops at the bottom margin instead and the bodies scroll.
         // (There used to be a fixed 820pt ceiling on top of this. With a card
         // height the user can drag and keep, a constant only got in the way.)
+        // Top stays pinned: growth ceiling is the room below the top edge, so the
+        // panel never slides up under the pointer. Content taller than this scrolls
+        // inside the result area (page reader / card bodies) rather than pushing
+        // the window off-screen — which requires the published budget below to be
+        // the *real* room, never floored above it.
         let roomBelowTop = panel.frame.maxY - visible.minY - Self.screenPadding
         let ceiling = max(
             Self.minFittedHeight,
             min(visible.height - Self.screenPadding * 2, roomBelowTop)
         )
 
-        // Publish how much height is left for the result list at that ceiling
-        // given the current chrome. Cards cap their bodies to it, so a tall
-        // input shrinks them (they scroll internally) instead of pushing the
-        // bottom card off-screen with no reachable scrollbar.
-        let budget = max(Self.minResultBudget, ceiling - chromeHeightMeasured - Self.fitBuffer)
+        // Publish how much height is actually left for the result list at that
+        // ceiling given the current chrome. The page reader and the card bodies
+        // size their internal scroll viewport to this, so it must NOT exceed the
+        // room the window can show — a floor above the real room (the old
+        // `minResultBudget = 200`) pushed the viewport past the window's bottom
+        // edge, clipped and unreachable, whenever the panel sat low on screen.
+        let budget = max(0, ceiling - chromeHeightMeasured - Self.fitBuffer)
         if abs(budget - viewModel.resultAreaBudget) > 1 {
             viewModel.resultAreaBudget = budget
         }
@@ -436,11 +497,15 @@ final class PanelController: NSObject, NSWindowDelegate {
 
         // Fit chrome + result (+ a small buffer so a hair-short measurement can't
         // clip the last card), clamped to [minFittedHeight, ceiling].
+        // While recognizing there's no result list — fit tight to the chrome (no
+        // minimum-height padding) so nothing dead-space sits under the language
+        // bar. Every other state keeps the normal floor.
+        let floor = viewModel.ocrRecognizing ? 0 : Self.minFittedHeight
         let desired = PanelLayout.windowHeight(
             chrome: chromeHeightMeasured,
             result: resultHeightMeasured,
             buffer: Self.fitBuffer,
-            floor: Self.minFittedHeight,
+            floor: floor,
             ceiling: ceiling
         )
         guard abs(desired - panel.frame.height) > 4 else { return } // ignore jitter
@@ -469,6 +534,9 @@ final class PanelController: NSObject, NSWindowDelegate {
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.viewModel.isPinned else { return }
+                // While a modal-ish child (the OCR image viewer) is up, clicks on
+                // it land outside the panel; don't let them dismiss the panel.
+                if self.suppressOutsideClose { return }
                 // A click that lands inside the panel's own frame (e.g. a corner
                 // or a pass-through region the window didn't opaquely capture)
                 // must not dismiss it — only genuine outside clicks close.

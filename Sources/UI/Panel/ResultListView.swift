@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// Vertically stacked result cards, one per enabled engine. Uses a plain VStack
-/// (no outer ScrollView): the stack is intrinsically sized, so its measured
-/// height is reliable and the window fits it exactly. Each card's body follows
-/// its streamed text up to its share of the window, then scrolls internally (its
-/// own NSScrollView) rather than pushing later cards out of the panel.
+/// Vertically stacked result cards, one per enabled engine. The stack is
+/// intrinsically sized so its measured height is reliable and the window fits it
+/// exactly. Each card's body follows its streamed text up to its share of the
+/// window (`perCardMaxBody`), then scrolls internally (its own NSScrollView)
+/// rather than pushing later cards out of the panel.
 struct ResultListView: View {
     @ObservedObject var viewModel: PanelViewModel
     @ObservedObject var run: TranslationRunController
@@ -20,10 +20,13 @@ struct ResultListView: View {
 
     @ViewBuilder
     private var content: some View {
-        if run.runs.isEmpty {
+        if viewModel.ocrRecognizing {
+            // Recognizing: nothing to translate yet. Render nothing so the result
+            // area collapses (no reserved hint height under the input).
+            Color.clear.frame(height: 0)
+        } else if run.runs.isEmpty {
             // Keep the placeholder's footprint stable, but hide its text while a
-            // notice toast is floating over this same spot — otherwise the two
-            // overlap (e.g. "没有识别到文字。" sitting on top of the hint).
+            // notice toast floats over this same spot (they'd overlap).
             Text("回车翻译，Shift+回车换行")
                 .font(.callout)
                 .foregroundStyle(.tertiary)

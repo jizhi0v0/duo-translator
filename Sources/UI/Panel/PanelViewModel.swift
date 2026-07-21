@@ -31,6 +31,17 @@ final class PanelViewModel: ObservableObject {
     @Published var collapsedEngineIDs: Set<String> = []
     /// Bumped to re-focus the input editor when the panel is shown.
     @Published var focusToken = 0
+    /// Active screenshot-OCR session (captured image + recognition state). When
+    /// set, the image rides at the top of the input box as an attachment. Nil for
+    /// non-OCR flows; cleared by `showInput` so a stale capture can't linger into
+    /// a 划词 / plain-input open.
+    @Published var ocr: OCRSession?
+    /// True only while OCR recognition is in flight. Gates the input box (no
+    /// cursor, no typing, no Enter) and the empty-results hint — both should wait
+    /// until there's actually recognized text. Mirrors `ocr.phase == .recognizing`
+    /// as a value the input/result views (which observe this VM, not the nested
+    /// session) can react to. Driven by `AppCoordinator` alongside the phase.
+    @Published var ocrRecognizing = false
     /// Transient error / hint shown under the header.
     @Published var notice: String?
     /// Optional actionable button shown alongside `notice` — e.g. a permission

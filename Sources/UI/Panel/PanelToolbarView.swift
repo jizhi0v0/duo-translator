@@ -70,7 +70,7 @@ struct PanelToolbarView: View {
 /// (e.g. pin engaged) tints the glyph with the accent color and shows a faint
 /// resting fill so the state is legible without hovering. `hoverTint` lets the
 /// close button glow red on hover, matching the platform's close affordance.
-private struct ToolbarIconButton: View {
+struct ToolbarIconButton: View {
     let systemName: String
     var isActive: Bool = false
     var hoverTint: Color? = nil

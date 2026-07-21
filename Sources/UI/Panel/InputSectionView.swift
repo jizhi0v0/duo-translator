@@ -39,12 +39,27 @@ struct InputSectionView: View {
     private var skipsMirror: Bool { viewModel.inputText.count > 1000 }
 
     private var editorHeight: CGFloat {
+        // While recognizing the editor is empty & disabled (just the "识别中…"
+        // placeholder). Pin it compact so a stale `contentHeight` left over from a
+        // prior translation doesn't keep the box tall (and the window oversized,
+        // leaving a gap) until the async mirror re-measures.
+        if viewModel.ocrRecognizing { return Self.minEditorHeight }
         if skipsMirror { return Self.maxEditorHeight }
         return PanelLayout.editorHeight(content: contentHeight, min: Self.minEditorHeight, max: Self.maxEditorHeight)
     }
 
     var body: some View {
         VStack(spacing: 0) {
+            // OCR: the captured image rides at the top of the input box like a
+            // chat composer's attachment, with recognition status. Everything
+            // below (editor, language bar, results) is the normal panel.
+            if let ocr = viewModel.ocr {
+                OCRAttachmentBar(session: ocr, onRemove: { viewModel.ocr = nil })
+                    .padding(.horizontal, 8)
+                    .padding(.top, 8)
+                    .padding(.bottom, 2)
+            }
+
             TextEditor(text: $viewModel.inputText)
                 .font(Self.font)
                 .lineSpacing(Self.lineSpacing)
@@ -54,6 +69,21 @@ struct InputSectionView: View {
                 .background(alignment: .topLeading) {
                     if !skipsMirror { heightMirror }
                 }
+                // "识别中…" placeholder while recognition is in flight (the editor
+                // is empty then). Observes the session so it clears the moment the
+                // text lands.
+                .overlay(alignment: .topLeading) {
+                    if let ocr = viewModel.ocr {
+                        OCRRecognizingLabel(session: ocr)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .allowsHitTesting(false)
+                    }
+                }
+                // While OCR recognition is in flight there is nothing to edit yet:
+                // disable the editor so it shows no cursor, takes no typing, and
+                // swallows no Enter. It re-enables the moment the text lands.
+                .disabled(viewModel.ocrRecognizing)
                 .focused($inputFocused)
                 .onKeyPress { press in
                     guard press.key == .return, !press.modifiers.contains(.shift) else {
@@ -63,10 +93,18 @@ struct InputSectionView: View {
                     return .handled
                 }
                 .onChange(of: viewModel.focusToken) {
-                    inputFocused = true
+                    // Don't grab focus mid-recognition: the disabled editor would
+                    // still blink a stray caret. Recognition completion clears the
+                    // flag and bumps `focusToken` again to focus it then.
+                    if !viewModel.ocrRecognizing { inputFocused = true }
+                }
+                .onChange(of: viewModel.ocrRecognizing) { _, recognizing in
+                    // Entering recognition: drop focus so no caret shows over the
+                    // "识别中…" placeholder.
+                    if recognizing { inputFocused = false }
                 }
                 .onAppear {
-                    inputFocused = true
+                    if !viewModel.ocrRecognizing { inputFocused = true }
                 }
 
             Divider().padding(.horizontal, 10)

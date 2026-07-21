@@ -7,6 +7,12 @@ final class AppCoordinator {
     private var settingsWindow: SettingsWindowController?
     private var statsWindow: StatsWindowController?
     private lazy var panel = PanelController()
+    private lazy var imagePreview: ImagePreviewController = {
+        let controller = ImagePreviewController()
+        // Closing the viewer re-arms the panel's outside-click dismissal.
+        controller.onClose = { [weak self] in self?.panel.setSuppressOutsideClose(false) }
+        return controller
+    }()
 
     // MARK: - Actions
 
@@ -49,8 +55,8 @@ final class AppCoordinator {
             let t0 = Date()
             Log.capture.debug("划词: 触发")
             do {
-                // Capture before showing the panel so focus is still in the
-                // source app.
+                // Text selection takes priority: capture it (AX first, ⌘C fallback)
+                // before showing the panel so focus is still in the source app.
                 let text = try await SelectedTextProvider.capture()
                 Log.capture.debug("划词: 捕获完成→显示面板, 触发起共 \(String(format: "%.1f", Date().timeIntervalSince(t0) * 1000), privacy: .public)ms")
                 translateText(text)
@@ -62,6 +68,16 @@ final class AppCoordinator {
                         PermissionCenter.openAccessibilitySettings()
                     }
                 )
+            } catch SelectedTextProvider.CaptureError.empty {
+                // No selectable text — only now judge the clipboard: if it holds an
+                // image (and not text), 划词 falls back to OCR. This keeps a stale
+                // clipboard image from hijacking every 划词 over a real selection.
+                if let cgImage = ClipboardImage.read() {
+                    Log.capture.debug("划词: 无选中文本，剪贴板是图片 → OCR")
+                    beginOCR(cgImage: cgImage, autoTranslate: true)
+                } else {
+                    panel.showNotice(SelectedTextProvider.CaptureError.empty.localizedDescription ?? "")
+                }
             } catch {
                 panel.showNotice(error.localizedDescription)
             }
@@ -80,31 +96,87 @@ final class AppCoordinator {
         Task { @MainActor in
             do {
                 let result = try await ScreenshotCapturer.captureRegion()
+                // Keep the crosshair capture FIRST: no window may appear over the
+                // region-selection overlay. Once a region is picked, show the OCR
+                // panel immediately (image column + recognizing state) and
+                // recognize with it up — text and translation then fill in place.
                 guard case .image(let image) = result else { return }
-                let settings = SettingsStore.shared
-                let provider = OCRFactory.makeProvider(settings: settings, keychain: .shared)
-                let text = try await provider.recognize(image)
+                beginOCR(cgImage: image, autoTranslate: autoTranslate)
+            } catch {
+                // Capture failed before any panel — the notice path is still right.
+                panel.showNotice(error.localizedDescription, action: Self.settingsAction(for: error))
+            }
+        }
+    }
+
+    /// Present the OCR panel for a captured image and start recognition. Shared by
+    /// the screenshot flow and the 划词 clipboard-image shortcut.
+    private func beginOCR(cgImage: CGImage, autoTranslate: Bool) {
+        let session = panel.showOCR(cgImage: cgImage)
+        // 重新识别 re-runs recognition on the same image (never auto-translating —
+        // the user is reviewing, not committing). Weak `session`: the closures are
+        // stored on the session itself.
+        session.reRecognize = { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.recognize(into: session, autoTranslate: false)
+        }
+        // Tapping the thumbnail opens the full-size viewer; suppress the panel's
+        // outside-click close while it's up.
+        session.onView = { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.panel.setSuppressOutsideClose(true)
+            self.imagePreview.show(session.image)
+        }
+        recognize(into: session, autoTranslate: autoTranslate)
+    }
+
+    /// Recognize `session`'s image and drive its phase. On success the text lands
+    /// in the panel's input box (single source of truth) and, when `autoTranslate`,
+    /// translation starts in place — the image column stays put, cards stream below
+    /// the input. Errors stay on the OCR column (never `showNotice`). Guards on the
+    /// panel's current session so a dismissed / superseded run can't apply.
+    private func recognize(into session: OCRSession, autoTranslate: Bool) {
+        session.phase = .recognizing
+        session.action = nil
+        // Clear any prior text so a 重新识别 doesn't show the last result behind
+        // the "识别中…" placeholder while the new pass runs.
+        session.text = ""
+        panel.viewModel.inputText = ""
+        panel.viewModel.ocrRecognizing = true
+        Task { @MainActor in
+            let provider = OCRFactory.makeProvider(settings: .shared, keychain: .shared)
+            do {
+                let text = try await provider.recognize(session.cgImage)
+                // Superseded by a new flow while recognizing: leave the flag to
+                // the new owner, drop this result.
+                guard panel.viewModel.ocr === session else { return }
+                panel.viewModel.ocrRecognizing = false
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 Log.capture.debug("OCR: 识别完成 \(trimmed.count, privacy: .public) 字")
                 guard !trimmed.isEmpty else {
                     // No text can mean an empty selection OR a blank/redacted
                     // screenshot from a missing Screen Recording grant. Only in
-                    // the latter case point at System Settings.
-                    if PermissionCenter.hasScreenCapture {
-                        panel.showNotice("没有识别到文字。")
-                    } else {
-                        panel.showNotice(
-                            "没有识别到文字。若截图为黑屏，请授予屏幕录制权限并重启 DuoTranslator。",
-                            action: PanelNoticeAction(title: "打开系统设置") {
-                                PermissionCenter.openScreenCaptureSettings()
-                            }
-                        )
+                    // the latter case offer the System Settings jump.
+                    session.phase = .empty
+                    if !PermissionCenter.hasScreenCapture {
+                        session.action = PanelNoticeAction(title: "打开系统设置") {
+                            PermissionCenter.openScreenCaptureSettings()
+                        }
                     }
                     return
                 }
-                panel.showInput(prefill: text, autoTranslate: autoTranslate)
+                session.text = trimmed
+                session.phase = .done
+                panel.viewModel.inputText = trimmed
+                // The editor was disabled while recognizing; focus it now so the
+                // recognized text is immediately editable (the 取字 review path).
+                panel.viewModel.focusToken += 1
+                if autoTranslate { panel.viewModel.translate() }
             } catch {
-                panel.showNotice(error.localizedDescription, action: Self.settingsAction(for: error))
+                guard panel.viewModel.ocr === session else { return }
+                panel.viewModel.ocrRecognizing = false
+                session.phase = .failed(error.localizedDescription)
+                session.action = Self.settingsAction(for: error)
             }
         }
     }
