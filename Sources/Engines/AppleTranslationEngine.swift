@@ -105,11 +105,11 @@ final class AppleTranslationBridge: ObservableObject {
         switch job {
         case .translate(let request, let continuation):
             do {
-                let response = try await session.translate(request.text)
+                let text = try await Self.translateStructured(request.text, in: session)
                 // A successful translation is authoritative proof the pack is
                 // installed, even if `status` earlier claimed otherwise.
                 markInstalled(source: request.sourceLanguage, target: request.targetLanguage)
-                continuation.resume(returning: response.targetText)
+                continuation.resume(returning: text)
             } catch {
                 continuation.resume(throwing: error)
             }
@@ -124,6 +124,35 @@ final class AppleTranslationBridge: ObservableObject {
         }
     }
 
+    /// The session re-segments input internally and reassembles `targetText`
+    /// nondeterministically — the same text sometimes comes back as one tight
+    /// block and sometimes as sentence-level fragments separated by blank
+    /// lines, ballooning the result card. Sidestep its reassembly entirely:
+    /// split the source into paragraph blocks ourselves, translate them as one
+    /// batch, and rejoin with exactly one blank line between blocks.
+    private static func translateStructured(
+        _ text: String, in session: TranslationSession
+    ) async throws -> String {
+        let blocks = AppleTranslationOutput.paragraphBlocks(text)
+        guard blocks.count > 1 else {
+            let response = try await session.translate(text)
+            return AppleTranslationOutput.normalizedBlock(response.targetText)
+        }
+        let batch = blocks.enumerated().map {
+            TranslationSession.Request(sourceText: $0.element, clientIdentifier: String($0.offset))
+        }
+        let responses = try await session.translations(from: batch)
+        // Order by clientIdentifier rather than trusting response order.
+        var byId: [String: String] = [:]
+        for response in responses {
+            if let id = response.clientIdentifier { byId[id] = response.targetText }
+        }
+        let ordered = byId.count == blocks.count
+            ? blocks.indices.map { byId[String($0)] ?? "" }
+            : responses.map(\.targetText)
+        return AppleTranslationOutput.join(ordered)
+    }
+
     func cancelPending() {
         guard let job = pending else { return }
         pending = nil
@@ -131,6 +160,46 @@ final class AppleTranslationBridge: ObservableObject {
         case .translate(_, let continuation): continuation.resume(throwing: CancellationError())
         case .prepare(_, _, let continuation): continuation.resume(throwing: CancellationError())
         }
+    }
+}
+
+/// Pure string plumbing for Apple translation output, separated from the
+/// session so it's unit-testable.
+enum AppleTranslationOutput {
+    /// Source paragraph blocks: maximal runs of non-blank lines. Blank-line
+    /// separators (however many, with stray spaces) are the block boundaries
+    /// the joined output reproduces as exactly one blank line.
+    static func paragraphBlocks(_ text: String) -> [String] {
+        var blocks: [String] = []
+        var current: [Substring] = []
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.allSatisfy(\.isWhitespace) {
+                if !current.isEmpty {
+                    blocks.append(current.joined(separator: "\n"))
+                    current = []
+                }
+            } else {
+                current.append(line)
+            }
+        }
+        if !current.isEmpty { blocks.append(current.joined(separator: "\n")) }
+        return blocks
+    }
+
+    /// A translated block came from source with no blank lines, so any blank
+    /// lines in it are session-invented: collapse each blank-line run to a
+    /// single newline, and trim the edges.
+    static func normalizedBlock(_ block: String) -> String {
+        block
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(
+                of: "\n(?:[ \\t]*\n)+", with: "\n", options: .regularExpression
+            )
+    }
+
+    /// Normalized blocks joined with one blank line, dropping empties.
+    static func join(_ blocks: [String]) -> String {
+        blocks.map(normalizedBlock).filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 }
 
