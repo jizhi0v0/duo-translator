@@ -10,6 +10,10 @@ struct ResultListView: View {
     @ObservedObject var run: TranslationRunController
     var onResultsHeightChange: (CGFloat) -> Void
     @State private var measuredCardStackHeight: CGFloat = 0
+    /// Each card's reported natural body height (see
+    /// `ResultCardView.naturalBodyNeed`), keyed by engine id. Feeds the
+    /// water-filling budget split; missing/nil entries claim an even share.
+    @State private var bodyNeeds: [String: CGFloat?] = [:]
 
     var body: some View {
         content
@@ -37,20 +41,22 @@ struct ResultListView: View {
         } else {
             ScrollView(.vertical) {
                 VStack(spacing: Self.cardSpacing) {
-                    ForEach(run.runs) { engineRun in
+                    let caps = perCardCaps
+                    ForEach(Array(run.runs.enumerated()), id: \.element.id) { index, engineRun in
                         ResultCardView(
                             engineRun: engineRun,
                             isCollapsed: viewModel.collapsedBinding(for: engineRun.id),
                             metricsPresented: viewModel.metricsPopoverBinding(for: engineRun.id),
                             targetLanguage: run.targetLanguage,
-                            maxBodyHeight: perCardMaxBody,
+                            maxBodyHeight: caps.indices.contains(index) ? caps[index] : 96,
                             layoutFrozen: viewModel.windowDragActive,
                             onRetry: { run.retry(runID: engineRun.id) },
                             onDownloadApple: { source, target in
                                 run.downloadAppleLanguagePack(
                                     runID: engineRun.id, source: source, target: target
                                 )
-                            }
+                            },
+                            onBodyNeedChange: { bodyNeeds.updateValue($0, forKey: engineRun.id) }
                         )
                     }
                 }
@@ -63,6 +69,7 @@ struct ResultListView: View {
             .frame(height: listViewportHeight)
             .scrollIndicators(.automatic)
             .accessibilityIdentifier("results.listScroll")
+            .onChange(of: run.runGeneration) { _, _ in bodyNeeds = [:] }
         }
     }
 
@@ -76,21 +83,28 @@ struct ResultListView: View {
         )
     }
 
-    /// Per-card body ceiling, shrinking as more providers share the window so
-    /// every card's header/footer stays visible (each body scrolls internally)
-    /// rather than the whole stack overflowing the window.
-    private var perCardMaxBody: CGFloat {
+    /// Per-card body ceilings (in `run.runs` order), shrinking as more
+    /// providers share the window so every header/footer stays visible.
+    /// Water-filling instead of an even split: a settled short or collapsed
+    /// card releases its unused share to the clipped card next to it, so the
+    /// stack can actually reach the budget (an even split left the tall card
+    /// clipped at half the window while the short card's share sat empty).
+    private var perCardCaps: [CGFloat] {
         // Budget is the live result-area height (window ceiling − chrome),
         // published by the panel, minus this view's own vertical padding (10+10).
         // So the cards shrink when the input/chrome is tall and the total always
         // fits — never pushing the bottom card off-screen with no scrollbar.
-        PanelLayout.perCardBodyMax(
-            count: run.runs.count,
+        PanelLayout.cardBodyCaps(
+            needs: run.runs.map { engineRun -> CGFloat? in
+                if viewModel.collapsedEngineIDs.contains(engineRun.id) { return 0 }
+                return bodyNeeds[engineRun.id] ?? nil
+            },
             budget: viewModel.resultAreaBudget
                 - Self.listVerticalPadding * 2
                 - Self.cardSpacing * CGFloat(max(0, run.runs.count - 1)),
             cardChrome: Self.cardChrome,
-            floor: 96
+            floor: 96,
+            capLimit: PanelLayout.maxAutoBodyHeight
         )
     }
 

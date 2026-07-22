@@ -86,6 +86,10 @@ struct StreamingTextView: NSViewRepresentable {
     /// Natural content height, reported as the stream grows. Opt-in: without a
     /// handler the view never measures.
     var onContentHeightChange: ((CGFloat) -> Void)?
+    /// Whether the latest measurement was stopped by `heightCeiling` — i.e. the
+    /// reported height is a lower bound, not the content's real height. The
+    /// card's budget split must not treat such a value as a known need.
+    var onContentClippedChange: ((Bool) -> Void)?
     /// Whether a jump-to-bottom affordance makes sense right now (the content
     /// overflows and the reader is not at the bottom). Dispatched async.
     var onScrollStateChange: ((Bool) -> Void)?
@@ -139,7 +143,8 @@ struct StreamingTextView: NSViewRepresentable {
 
         context.coordinator.setup(textView: textView, attributes: attributes)
         context.coordinator.configureHeightReporting(
-            ceiling: heightCeiling, settled: settled, handler: onContentHeightChange
+            ceiling: heightCeiling, settled: settled, handler: onContentHeightChange,
+            clippedHandler: onContentClippedChange
         )
         context.coordinator.configureFollow(
             suppressed: suppressFollow, handler: onScrollStateChange
@@ -151,7 +156,8 @@ struct StreamingTextView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.configureHeightReporting(
-            ceiling: heightCeiling, settled: settled, handler: onContentHeightChange
+            ceiling: heightCeiling, settled: settled, handler: onContentHeightChange,
+            clippedHandler: onContentClippedChange
         )
         context.coordinator.configureFollow(
             suppressed: suppressFollow, handler: onScrollStateChange
@@ -168,6 +174,7 @@ struct StreamingTextView: NSViewRepresentable {
         private var attributes: [NSAttributedString.Key: Any] = [:]
         private weak var model: StreamingTextModel?
         private var onContentHeightChange: ((CGFloat) -> Void)?
+        private var onContentClippedChange: ((Bool) -> Void)?
         private var heightCeiling: CGFloat = 0
         private var lastReportedHeight: CGFloat = 0
         private var lastWidth: CGFloat = 0
@@ -269,9 +276,11 @@ struct StreamingTextView: NSViewRepresentable {
         }
 
         func configureHeightReporting(
-            ceiling: CGFloat, settled: Bool, handler: ((CGFloat) -> Void)?
+            ceiling: CGFloat, settled: Bool, handler: ((CGFloat) -> Void)?,
+            clippedHandler: ((Bool) -> Void)? = nil
         ) {
             onContentHeightChange = handler
+            onContentClippedChange = clippedHandler
             // A raised ceiling means the content may grow further than the last
             // report, so measuring has to resume. The run settling likewise gets
             // one fresh measurement, so a finished translation can never be left
@@ -333,6 +342,11 @@ struct StreamingTextView: NSViewRepresentable {
                       let textView = self.textView,
                       let height = documentHeight(of: textView) else { return }
                 self.reachedHeightCeiling = height >= self.heightCeiling - 1
+                // Deliver the clip state before the monotone guard below: a
+                // grown ceiling with unchanged content re-measures to the same
+                // height (which the guard rejects), yet the flag must still
+                // clear so the budget split can trust the measurement.
+                self.onContentClippedChange?(self.reachedHeightCeiling)
                 // Within a run the document only grows (appends are the only
                 // edit), so a measurement that comes back *shorter* is not the
                 // content shrinking — it is TextKit 2 having dropped or

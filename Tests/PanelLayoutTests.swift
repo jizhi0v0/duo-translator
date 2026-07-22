@@ -144,7 +144,7 @@ final class PanelLayoutTests: XCTestCase {
         // below it covers the whole usable ceiling.
         XCTAssertEqual(
             PanelLayout.allowedFitHeight(
-                roomBelowTop: 1031, screenCeiling: 1007, minHeight: 220, chrome: 246
+                roomBelowTop: 1031, currentHeight: 0, screenCeiling: 1007, minHeight: 220, chrome: 246
             ),
             1007
         )
@@ -155,7 +155,7 @@ final class PanelLayoutTests: XCTestCase {
         // chosen top edge, so a long result can never shove the panel back up.
         XCTAssertEqual(
             PanelLayout.allowedFitHeight(
-                roomBelowTop: 475, screenCeiling: 1007, minHeight: 220, chrome: 246
+                roomBelowTop: 475, currentHeight: 0, screenCeiling: 1007, minHeight: 220, chrome: 246
             ),
             475
         )
@@ -165,7 +165,7 @@ final class PanelLayoutTests: XCTestCase {
         // The release-time catch-up fit for a mid-screen panel with a long
         // streamed result: height stops at the room below the top edge.
         let allowed = PanelLayout.allowedFitHeight(
-            roomBelowTop: 475, screenCeiling: 1007, minHeight: 220, chrome: 246
+            roomBelowTop: 475, currentHeight: 0, screenCeiling: 1007, minHeight: 220, chrome: 246
         )
         let desired = PanelLayout.windowHeight(
             chrome: 240, result: 761, buffer: 6, floor: 220, ceiling: allowed
@@ -176,7 +176,7 @@ final class PanelLayoutTests: XCTestCase {
     func testAllowedFitLiftsOnlyByTheMinimumHeightShortfall() {
         XCTAssertEqual(
             PanelLayout.allowedFitHeight(
-                roomBelowTop: 100, screenCeiling: 1007, minHeight: 220, chrome: 150
+                roomBelowTop: 100, currentHeight: 0, screenCeiling: 1007, minHeight: 220, chrome: 150
             ),
             220
         )
@@ -187,7 +187,7 @@ final class PanelLayoutTests: XCTestCase {
         // room: the panel may lift just far enough to keep the chrome visible.
         XCTAssertEqual(
             PanelLayout.allowedFitHeight(
-                roomBelowTop: 250, screenCeiling: 1007, minHeight: 220, chrome: 326
+                roomBelowTop: 250, currentHeight: 0, screenCeiling: 1007, minHeight: 220, chrome: 326
             ),
             326
         )
@@ -198,7 +198,7 @@ final class PanelLayoutTests: XCTestCase {
         // panel lifts by exactly the chrome+strip shortfall.
         XCTAssertEqual(
             PanelLayout.allowedFitHeight(
-                roomBelowTop: 285, screenCeiling: 1007, minHeight: 220,
+                roomBelowTop: 285, currentHeight: 0, screenCeiling: 1007, minHeight: 220,
                 chrome: 246, resultFloor: 150
             ),
             396
@@ -208,10 +208,73 @@ final class PanelLayoutTests: XCTestCase {
     func testAllowedFitWithoutResultsReservesNoStrip() {
         XCTAssertEqual(
             PanelLayout.allowedFitHeight(
-                roomBelowTop: 285, screenCeiling: 1007, minHeight: 220, chrome: 246
+                roomBelowTop: 285, currentHeight: 0, screenCeiling: 1007, minHeight: 220, chrome: 246
             ),
             285
         )
+    }
+
+    func testAllowedFitNeverShrinksBelowCurrentHeight() {
+        // A straddling panel (or a re-shown Dock) can leave less room below the
+        // top edge than the window's own height; placement alone must never
+        // shrink the window.
+        XCTAssertEqual(
+            PanelLayout.allowedFitHeight(
+                roomBelowTop: 475, currentHeight: 700, screenCeiling: 1007, minHeight: 220, chrome: 246
+            ),
+            700
+        )
+    }
+
+    func testAllowedFitAtFlushBottomKeepsTheCurrentHeight() {
+        // Parked flush at the screen bottom, the room below the top edge equals
+        // the window height exactly — the settle fit must be an identity.
+        XCTAssertEqual(
+            PanelLayout.allowedFitHeight(
+                roomBelowTop: 600, currentHeight: 600, screenCeiling: 1007, minHeight: 220, chrome: 246
+            ),
+            600
+        )
+    }
+
+    func testScreenCeilingWinsOverCurrentHeight() {
+        // Moving to a smaller screen is the one thing allowed to pull the
+        // window under its current height.
+        XCTAssertEqual(
+            PanelLayout.allowedFitHeight(
+                roomBelowTop: 475, currentHeight: 900, screenCeiling: 700, minHeight: 220, chrome: 246
+            ),
+            700
+        )
+    }
+
+    func testNeedFloorStillLiftsATinyWindowParkedAtTheBottom() {
+        // A short input-only panel parked at the bottom when a run starts:
+        // the chrome+strip shortfall still lifts it, current height or not.
+        XCTAssertEqual(
+            PanelLayout.allowedFitHeight(
+                roomBelowTop: 120, currentHeight: 120, screenCeiling: 1007, minHeight: 220,
+                chrome: 246, resultFloor: 150
+            ),
+            396
+        )
+    }
+
+    func testSettleFitAtRestIsANoOp() {
+        // Streaming over, window fitted to its content, dragged anywhere on
+        // screen: the catch-up fit recomputes exactly the current height, so
+        // the 4pt jitter guard turns it into zero frame changes.
+        let current: CGFloat = 640
+        for roomBelowTop in [CGFloat(640), 700, 1000] {
+            let allowed = PanelLayout.allowedFitHeight(
+                roomBelowTop: roomBelowTop, currentHeight: current, screenCeiling: 1007,
+                minHeight: 220, chrome: 246, resultFloor: 150
+            )
+            let desired = PanelLayout.windowHeight(
+                chrome: 240, result: 394, buffer: 6, floor: 220, ceiling: allowed
+            )
+            XCTAssertEqual(desired, current)
+        }
     }
 
     // MARK: - Cross-screen drag
@@ -503,25 +566,25 @@ final class PanelLayoutTests: XCTestCase {
     /// translation must not sit in a tall box of empty space (which is what
     /// made the old behaviour need a manual reset every time).
     func testDraggedHeightActsAsACeiling() {
-        let h = PanelLayout.bodyHeight(dragged: 220, measured: 40, floor: 96, cap: 300)
+        let h = PanelLayout.bodyHeight(dragged: 220, measured: 40, displayed: nil, floor: 96, cap: 300)
         XCTAssertEqual(h, PanelLayout.growingBodyHeight(measured: 40, floor: 96, cap: 220))
         XCTAssertLessThan(h, 220)
     }
 
     func testDraggedCeilingStopsLongContent() {
-        let h = PanelLayout.bodyHeight(dragged: 120, measured: 900, floor: 96, cap: 300)
+        let h = PanelLayout.bodyHeight(dragged: 120, measured: 900, displayed: nil, floor: 96, cap: 300)
         XCTAssertEqual(h, PanelLayout.lineAlignedBodyHeight(atMost: 120))
     }
 
     /// The window's own share still wins: a ceiling dragged (or restored from
     /// defaults) larger than the card's slice can't push the card off-screen.
     func testWindowShareWinsOverATallerDraggedCeiling() {
-        let h = PanelLayout.bodyHeight(dragged: 5000, measured: 900, floor: 96, cap: 300)
+        let h = PanelLayout.bodyHeight(dragged: 5000, measured: 900, displayed: nil, floor: 96, cap: 300)
         XCTAssertEqual(h, PanelLayout.lineAlignedBodyHeight(atMost: 300))
     }
 
     func testNoDragFallsBackToFollowingTheContent() {
-        let h = PanelLayout.bodyHeight(dragged: nil, measured: 210, floor: 96, cap: 300)
+        let h = PanelLayout.bodyHeight(dragged: nil, measured: 210, displayed: nil, floor: 96, cap: 300)
         XCTAssertEqual(h, PanelLayout.growingBodyHeight(measured: 210, floor: 96, cap: 300))
     }
 
@@ -549,5 +612,242 @@ final class PanelLayoutTests: XCTestCase {
             let h = PanelLayout.growingBodyHeight(measured: measured, floor: 96, cap: 72)
             XCTAssertLessThanOrEqual(h, 72)
         }
+    }
+
+    // MARK: - Body-cap ratchet (window placement never claws back content)
+
+    func testCapDecreaseNeverShrinksARenderedBody() {
+        // Parked at the screen bottom, the budget redistributes into a smaller
+        // per-card share; the taller card keeps what it already shows.
+        let displayed = PanelLayout.lineAlignedBodyHeight(atMost: 300)
+        let h = PanelLayout.bodyHeight(
+            dragged: nil, measured: 500, displayed: displayed, floor: 96, cap: 180
+        )
+        XCTAssertEqual(h, displayed)
+    }
+
+    func testContentShrinkReleasesTheRatchet() {
+        // A retry / shorter translation collapses normally: the ratchet only
+        // protects content that is still there.
+        let h = PanelLayout.bodyHeight(
+            dragged: nil, measured: 100, displayed: 300, floor: 96, cap: 180
+        )
+        XCTAssertEqual(h, PanelLayout.growingBodyHeight(measured: 100, floor: 96, cap: 180))
+    }
+
+    func testDraggedDividerShrinksThroughTheRatchet() {
+        let h = PanelLayout.bodyHeight(
+            dragged: 120, measured: 500, displayed: 300, floor: 96, cap: 180
+        )
+        XCTAssertEqual(h, PanelLayout.lineAlignedBodyHeight(atMost: 120))
+    }
+
+    func testCapGrowthStillGrowsARatchetedBody() {
+        let h = PanelLayout.bodyHeight(
+            dragged: nil, measured: 500, displayed: 300, floor: 96, cap: 400
+        )
+        XCTAssertEqual(h, PanelLayout.lineAlignedBodyHeight(atMost: 400))
+    }
+
+    func testUnmeasuredCardIgnoresTheRatchet() {
+        // A fresh card (`measured == nil`) has nothing to protect; the initial
+        // `displayed` placeholder must not inflate its cap.
+        XCTAssertEqual(
+            PanelLayout.effectiveBodyCap(cap: 180, displayed: 300, measured: nil),
+            180
+        )
+        XCTAssertEqual(
+            PanelLayout.bodyHeight(dragged: nil, measured: nil, displayed: 300, floor: 96, cap: 180),
+            PanelLayout.bodyHeight(dragged: nil, measured: nil, displayed: nil, floor: 96, cap: 180)
+        )
+    }
+
+    // MARK: - Body render ceiling
+
+    func testRenderCeilingIsTheCapWhenNothingElseBinds() {
+        XCTAssertEqual(
+            PanelLayout.bodyRenderCeiling(dragged: nil, measured: 200, displayed: 180, cap: 300),
+            300
+        )
+    }
+
+    func testRenderCeilingHoldsARatchetedBody() {
+        XCTAssertEqual(
+            PanelLayout.bodyRenderCeiling(dragged: nil, measured: 500, displayed: 300, cap: 180),
+            300
+        )
+    }
+
+    func testRenderCeilingHonorsABindingDraggedHeight() {
+        XCTAssertEqual(
+            PanelLayout.bodyRenderCeiling(dragged: 120, measured: 500, displayed: 300, cap: 180),
+            120
+        )
+    }
+
+    // MARK: - Phase fit ceiling
+
+    func testStreamingFitStaysInsideTheDownRoom() {
+        // Mid-stream growth fills toward the screen bottom and then scrolls —
+        // it never lifts the user's top edge.
+        XCTAssertEqual(
+            PanelLayout.fitHeightCeiling(streaming: true, allowed: 475, screenCeiling: 1007),
+            475
+        )
+    }
+
+    func testSettledFitMayUseTheWholeScreen() {
+        // The closing fit may lift the top edge by the shortfall, so a parked
+        // panel opens to its content instead of stopping at a mid height.
+        XCTAssertEqual(
+            PanelLayout.fitHeightCeiling(streaming: false, allowed: 475, screenCeiling: 1007),
+            1007
+        )
+    }
+
+    // MARK: - Water-filling budget split
+
+    func testCapsSplitEvenlyWhileAllCardsAreUnknown() {
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [nil, nil], budget: 500, cardChrome: 90, floor: 96, slack: 20
+        )
+        XCTAssertEqual(caps, [160, 160]) // (500 − 180) / 2
+    }
+
+    func testSettledShortCardReleasesItsSurplus() {
+        // The even split stranded budget: the short card couldn't use its
+        // share and the clipped card wasn't allowed to. The satisfied card is
+        // granted one slack above its need (hysteresis, see cardBodyCaps).
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [120, nil], budget: 500, cardChrome: 90, floor: 96, slack: 20
+        )
+        XCTAssertEqual(caps, [140, 180]) // 320 available − (120+20) → rest to the tall card
+    }
+
+    func testSatisfiedGrantKeepsCeilingAboveTheNeed() {
+        // The fixed point: a granted cap flush with the measurement reads as
+        // ceiling-stopped on the next report, flips the need back to unknown,
+        // and the whole split (and window) oscillates.
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [240, nil], budget: 800, cardChrome: 90, floor: 96, slack: 20
+        )
+        XCTAssertGreaterThanOrEqual(caps[0], 260)
+    }
+
+    func testCollapsedCardReleasesEverything() {
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [0, nil], budget: 500, cardChrome: 90, floor: 96, slack: 20
+        )
+        XCTAssertEqual(caps, [0, 320])
+    }
+
+    func testTwoOverShareCardsStillSplitEvenly() {
+        // Both known needs exceed the fair share: nobody releases anything.
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [400, 500], budget: 500, cardChrome: 90, floor: 96, slack: 20
+        )
+        XCTAssertEqual(caps, [160, 160])
+    }
+
+    func testTinyNeedStillConsumesTheFloor() {
+        // An expanded card never renders below its line-aligned floor, so the
+        // split must not hand its neighbours more than actually frees up.
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [10, nil], budget: 500, cardChrome: 90, floor: 96, slack: 20
+        )
+        XCTAssertEqual(caps, [116, 204]) // grants max(floor, 10) + slack = 116
+    }
+
+    func testTightBudgetFloorsEveryCard() {
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [nil, nil], budget: 100, cardChrome: 90, floor: 96, slack: 20
+        )
+        XCTAssertEqual(caps, [96, 96])
+    }
+
+    func testSingleUnknownCardTakesTheWholeBudget() {
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [nil], budget: 500, cardChrome: 90, floor: 96, slack: 20
+        )
+        XCTAssertEqual(caps, [410])
+    }
+
+    func testAllSettledShortCardsJustTakeTheirNeeds() {
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [120, 150], budget: 800, cardChrome: 90, floor: 96, slack: 20
+        )
+        XCTAssertEqual(caps, [140, 170])
+    }
+
+    func testCapLimitBoundsASoleClaimant() {
+        // A collapsed neighbour + a huge settled budget used to grow the lone
+        // card into a near-fullscreen body; the auto ceiling stops it.
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [0, nil], budget: 900, cardChrome: 90, floor: 96, slack: 20, capLimit: 360
+        )
+        XCTAssertEqual(caps, [0, 360])
+    }
+
+    func testCapLimitBoundsASatisfiedGrant() {
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [500, nil], budget: 2000, cardChrome: 90, floor: 96, slack: 20, capLimit: 360
+        )
+        XCTAssertEqual(caps[0], 360)
+    }
+
+    func testMaxAutoBodyHeightIsLineAligned() {
+        // Seven whole lines: a body capped at the auto ceiling must cut on a
+        // clean line boundary, never mid-glyph.
+        XCTAssertEqual(
+            PanelLayout.lineAlignedBodyHeight(atMost: PanelLayout.maxAutoBodyHeight),
+            PanelLayout.maxAutoBodyHeight
+        )
+    }
+
+    func testCapLimitLeavesSmallSharesAlone() {
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [nil, nil], budget: 500, cardChrome: 90, floor: 96, slack: 20, capLimit: 360
+        )
+        XCTAssertEqual(caps, [160, 160])
+    }
+
+    /// The user-visible stall: mid position, short Apple card + long OpenAI
+    /// card. Even split stopped the stack below the budget; water-filling must
+    /// hand the tall card everything the short one doesn't use.
+    func testMidHeightStallScenarioFillsTheBudget() {
+        let budget: CGFloat = 519 // 547 minus list padding + spacing
+        let caps = PanelLayout.cardBodyCaps(
+            needs: [130, nil], budget: budget, cardChrome: 90, floor: 96, slack: 20
+        )
+        XCTAssertEqual(caps[0], 150)
+        XCTAssertEqual(caps[1], budget - 180 - 150) // 189, vs 169.5 under even split
+        // Stack chrome + caps sums exactly to the budget — nothing stranded.
+        XCTAssertEqual(caps[0] + caps[1] + 180, budget)
+    }
+
+    /// The fixed point behind the flush-bottom shrink bug: two unequal cards
+    /// with a budget exactly equal to the rendered stack. The even split hands
+    /// the taller card a cap below what it already shows; the ratchet must
+    /// keep both bodies — and therefore the stack, the reported height, and
+    /// the window — exactly where they are.
+    func testFlushBottomEvenSplitLeavesUnequalCardsUntouched() {
+        let cardChrome: CGFloat = 90
+        let floor: CGFloat = 96
+        let tall = PanelLayout.lineAlignedBodyHeight(atMost: 300)
+        let short = PanelLayout.stableBodyHeight(preferred: floor, cap: 1000)
+        let budget = (tall + cardChrome) + (short + cardChrome)
+        let share = PanelLayout.perCardBodyMax(
+            count: 2, budget: budget, cardChrome: cardChrome, floor: floor
+        )
+        XCTAssertLessThan(share, tall) // the even split really cuts into the tall card
+
+        let tallAfter = PanelLayout.bodyHeight(
+            dragged: nil, measured: 500, displayed: tall, floor: floor, cap: share
+        )
+        let shortAfter = PanelLayout.bodyHeight(
+            dragged: nil, measured: 60, displayed: short, floor: floor, cap: share
+        )
+        XCTAssertEqual(tallAfter, tall)
+        XCTAssertEqual(shortAfter, short)
     }
 }

@@ -21,11 +21,19 @@ struct ResultCardView: View {
     var onRetry: () -> Void
     /// Apple language-pack download, invoked from the in-card prompt.
     var onDownloadApple: (String?, String) -> Void
+    /// Reports this card's known natural body height for the list's
+    /// water-filling budget split — `nil` while it is unknown (streaming, or
+    /// clipped so the measurement is only a lower bound).
+    var onBodyNeedChange: (CGFloat?) -> Void = { _ in }
 
     @ObservedObject private var settings = SettingsStore.shared
     /// Natural height of the streamed text, reported by the text view. `nil`
     /// until the first measurement lands.
     @State private var measuredBodyHeight: CGFloat?
+    /// Whether the latest measurement was stopped by the body's render ceiling
+    /// (a lower bound, not the content's real height). Reported by the text
+    /// view alongside the height.
+    @State private var measuredClipped = false
     /// Live height while the divider is being dragged, and the height the drag
     /// started from. Both nil when no drag is in progress.
     @State private var dragHeight: CGFloat?
@@ -64,7 +72,10 @@ struct ResultCardView: View {
                     // scrolls inside itself.
                     StreamingTextView(
                         model: engineRun.stream,
-                        heightCeiling: maxBodyHeight,
+                        // The ceiling the body actually renders under (ratchet
+                        // and dragged height included), so the clip flag means
+                        // exactly "the content exceeds what is shown".
+                        heightCeiling: bodyRenderCeiling,
                         settled: !isStreaming,
                         suppressFollow: layoutFrozen,
                         jumpToBottomToken: jumpToken,
@@ -72,6 +83,7 @@ struct ResultCardView: View {
                         // reports from a dispatched block, never inside a SwiftUI
                         // update pass.
                         onContentHeightChange: { height in measuredBodyHeight = height },
+                        onContentClippedChange: { measuredClipped = $0 },
                         onScrollStateChange: { canJumpToBottom = $0 }
                     )
                     .frame(height: displayedBodyHeight)
@@ -126,8 +138,15 @@ struct ResultCardView: View {
         // height for a frame before the stream re-measures. The text view also
         // re-measures on reset; this just makes the reused-card case explicit.
         .onChange(of: isAwaitingContent) { _, awaiting in
-            if awaiting { measuredBodyHeight = nil }
+            if awaiting {
+                measuredBodyHeight = nil
+                measuredClipped = false
+            }
         }
+        .onChange(of: naturalBodyNeed) { _, need in
+            onBodyNeedChange(need)
+        }
+        .onAppear { onBodyNeedChange(naturalBodyNeed) }
     }
 
     private var header: some View {
@@ -230,17 +249,51 @@ struct ResultCardView: View {
     /// The dragged height if there is one, otherwise it follows the streamed
     /// content from `minBodyHeight` up to the card's share of the window; past
     /// that the body scrolls internally instead of growing.
+    private var draggedHeight: CGFloat? {
+        dragHeight ?? settings.resultBodyHeight(for: engineRun.id)
+    }
+
     private var bodyHeight: CGFloat {
         PanelLayout.bodyHeight(
-            dragged: dragHeight ?? settings.resultBodyHeight(for: engineRun.id),
+            dragged: draggedHeight,
             measured: measuredBodyHeight,
+            displayed: lastDisplayedBodyHeight,
             floor: Self.minBodyHeight,
+            cap: maxBodyHeight
+        )
+    }
+
+    private var bodyRenderCeiling: CGFloat {
+        PanelLayout.bodyRenderCeiling(
+            dragged: draggedHeight,
+            measured: measuredBodyHeight,
+            displayed: lastDisplayedBodyHeight,
             cap: maxBodyHeight
         )
     }
 
     private var displayedBodyHeight: CGFloat {
         layoutFrozen ? lastDisplayedBodyHeight : bodyHeight
+    }
+
+    /// The card's settled natural body height for the list's budget split, or
+    /// nil while unknown: still streaming, unmeasured, or ceiling-clipped.
+    /// The clip flag comes from the text view itself — a measurement stopped
+    /// by the ceiling is a lower bound, and treating it as a known need
+    /// starved the clipped card while its neighbour took the whole budget
+    /// (and flip-flopped the split, which read as jitter while dragging).
+    /// A binding divider height is the exception: consumption is pinned to
+    /// the rendered height no matter how much budget appears.
+    private var naturalBodyNeed: CGFloat? {
+        if case .streaming = engineRun.state { return nil }
+        guard let measured = measuredBodyHeight else { return nil }
+        if let dragged = draggedHeight,
+           dragged <= PanelLayout.effectiveBodyCap(
+               cap: maxBodyHeight, displayed: lastDisplayedBodyHeight, measured: measured
+           ) {
+            return bodyHeight
+        }
+        return measuredClipped ? nil : measured
     }
 
     /// The divider above the footer doubles as a resize handle: drag it to set
@@ -270,10 +323,18 @@ struct ResultCardView: View {
                         // resize can't feed back into its own input.
                         let base = dragStartHeight ?? bodyHeight
                         if dragStartHeight == nil { dragStartHeight = base }
+                        // Clamp against the ratcheted cap, not the raw share:
+                        // a ratcheted body sits above `maxBodyHeight`, and
+                        // clamping to the share would snap it shorter the
+                        // moment the divider is touched.
                         dragHeight = PanelLayout.clampDraggedBodyHeight(
                             base + value.translation.height,
                             floor: Self.minBodyHeight,
-                            cap: maxBodyHeight
+                            cap: PanelLayout.effectiveBodyCap(
+                                cap: maxBodyHeight,
+                                displayed: lastDisplayedBodyHeight,
+                                measured: measuredBodyHeight
+                            )
                         )
                     }
                     .onEnded { _ in

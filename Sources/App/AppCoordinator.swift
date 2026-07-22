@@ -207,6 +207,10 @@ final class AppCoordinator {
         panel.close()
     }
 
+    func debugMovePanel(_ spec: String) {
+        panel.debugMove(spec)
+    }
+
     /// Debug hook (`dev.bobby.duo.debug.ocrTest`): render a known sample image
     /// and run an LLM vision provider against it end-to-end, logging the result
     /// or error. Uses the real keychain key, so it exercises the exact path a

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 final class TranslatorPanel: NSPanel {
@@ -180,6 +181,11 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
     }
     private var frozenScrollPositions: [ObjectIdentifier: FrozenScrollPosition] = [:]
+    /// Engine run-state changes re-run the fit. The settle transition needs an
+    /// explicit trigger: when the last engine finishes with its card already
+    /// capped, no geometry callback fires, yet the fit ceiling just changed
+    /// from "room below the top edge" to "whole screen" (see `refit`).
+    private var runStateObservation: AnyCancellable?
 
     /// Initial estimate for the chrome above the result list; replaced by a
     /// live measurement once the view lays out.
@@ -291,6 +297,19 @@ final class PanelController: NSObject, NSWindowDelegate {
         // under the language bar. Detach it so `setFrame` fully controls height.
         hostingView.sizingOptions = []
         panel.contentView = hostingView
+
+        // Re-fit on every engine state change, re-wired whenever the run set
+        // itself changes. Deferred a turn so SwiftUI/TextKit deliver the
+        // settle-time measurements first and the fit consumes them in one pass.
+        runStateObservation = viewModel.run.$runs
+            .map { runs in
+                Publishers.MergeMany(runs.map { $0.$state.dropFirst().map { _ in () } })
+            }
+            .switchToLatest()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                DispatchQueue.main.async { self?.refit() }
+            }
     }
 
     /// Resize the panel's width for the current mode, keeping the top edge and
@@ -619,6 +638,24 @@ final class PanelController: NSObject, NSWindowDelegate {
         refit()
     }
 
+    /// Debug hook (`dev.bobby.duo.debug.movePanel`): park the panel at a named
+    /// vertical spot on its current screen — "bottom" (flush against the usable
+    /// bottom edge), "top", or "mid". Goes through `setFrameOrigin`, so it
+    /// exercises the same `windowDidMove` → `refit` path an external move
+    /// takes; the LSUIElement panel can't be driven by synthetic mouse drags.
+    func debugMove(_ spec: String) {
+        guard panel.isVisible, let screen = panelScreen else { return }
+        let visible = screen.visibleFrame
+        var origin = panel.frame.origin
+        switch spec {
+        case "top": origin.y = visible.maxY - panel.frame.height
+        case "mid": origin.y = visible.minY + (visible.height - panel.frame.height) / 2
+        default: origin.y = visible.minY
+        }
+        panel.setFrameOrigin(origin)
+        Log.app.notice("面板位置: debugMove \(spec, privacy: .public) frame=\(String(describing: self.panel.frame), privacy: .public)")
+    }
+
     /// Size the panel to fit `chrome + result` content, grow and shrink, with
     /// the **top edge pinned**: results stream downward while the input stays
     /// put, and a user-dragged top edge is preserved — growth fills the room
@@ -646,14 +683,32 @@ final class PanelController: NSObject, NSWindowDelegate {
         // strip — can't come back. The floors are need-driven: a panel parked
         // at the very bottom lifts only by the shortfall that keeps
         // `minFittedHeight` and an unclipped chrome, never a full-screen jump.
+        // Placement only ever *raises* the allowance: the current height is a
+        // floor, so dragging the panel low can't shrink it — only content
+        // changes (a smaller `desired`) or a smaller screen's ceiling can.
         let resultFloor: CGFloat =
             viewModel.run.runs.isEmpty || viewModel.ocrRecognizing ? 0 : Self.minVisibleResultStrip
         let allowed = PanelLayout.allowedFitHeight(
             roomBelowTop: panel.frame.maxY - visible.minY,
+            currentHeight: panel.frame.height,
             screenCeiling: ceiling,
             minHeight: Self.minFittedHeight,
             chrome: chromeHeightMeasured + Self.fitBuffer,
             resultFloor: resultFloor
+        )
+        // While streaming, growth fills only the room below the top edge —
+        // reaching the screen bottom turns into internal scrolling, never a
+        // window that chases the stream upward. Once every engine settles, one
+        // closing fit may lift the top edge by the remaining shortfall
+        // (bottom-anchored, via the dragOrigin safety net below): a panel
+        // parked low opens to the content's full height instead of leaving the
+        // reader a manual drag away from seeing it.
+        let streamingActive = viewModel.run.runs.contains { run in
+            if case .streaming = run.state { return true }
+            return false
+        }
+        let fitCeiling = PanelLayout.fitHeightCeiling(
+            streaming: streamingActive, allowed: allowed, screenCeiling: ceiling
         )
 
         // Publish how much height is actually left for the result list at that
@@ -662,10 +717,16 @@ final class PanelController: NSObject, NSWindowDelegate {
         // exceed the room the window can show — a floor above the real room
         // (the old `minResultBudget = 200`) pushed the viewport past the
         // window's bottom edge, clipped and unreachable.
-        let budget = max(0, allowed - chromeHeightMeasured - Self.fitBuffer)
+        let budget = max(0, fitCeiling - chromeHeightMeasured - Self.fitBuffer)
         if abs(budget - viewModel.resultAreaBudget) > 1 {
             viewModel.resultAreaBudget = budget
         }
+        Log.app.debug("""
+        面板 refit: room=\(Int(self.panel.frame.maxY - visible.minY)) cur=\(Int(self.panel.frame.height)) \
+        allowed=\(Int(allowed)) fitCeiling=\(Int(fitCeiling)) streaming=\(streamingActive) \
+        chrome=\(Int(self.chromeHeightMeasured)) budget=\(Int(budget)) \
+        result=\(Int(self.resultHeightMeasured))
+        """)
 
         // A mode switch is a two-part update: install the new width, then wait
         // for that mode's content to report at the new layout. Holding here
@@ -688,7 +749,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             result: resultHeightMeasured,
             buffer: Self.fitBuffer,
             floor: floor,
-            ceiling: allowed
+            ceiling: fitCeiling
         )
         guard abs(desired - panel.frame.height) > 4 else { return } // ignore jitter
 
@@ -1014,12 +1075,35 @@ enum PanelLayout {
     /// overall minimum, and the chrome plus a minimum result strip (the input
     /// must not be clipped, and existing cards must not be squeezed to zero,
     /// by a panel parked at the screen bottom) — each lifting the panel by at
-    /// most its own shortfall. Never exceeds the screen's usable ceiling.
+    /// most its own shortfall.
+    ///
+    /// `currentHeight` makes placement one-directional: moving the window can
+    /// raise the allowance (more room below the top edge) but never lower it —
+    /// with a straddling panel or a re-shown Dock, `roomBelowTop` can dip below
+    /// the window's own height, and without this floor that shrank the window
+    /// by position alone. The allowance is a *ceiling* on the fitted height,
+    /// so content-driven shrinking is unaffected. The only thing that can pull
+    /// it under the current height is `screenCeiling` (moving to a smaller
+    /// screen), which always wins.
     static func allowedFitHeight(
-        roomBelowTop: CGFloat, screenCeiling: CGFloat, minHeight: CGFloat,
-        chrome: CGFloat, resultFloor: CGFloat = 0
+        roomBelowTop: CGFloat, currentHeight: CGFloat, screenCeiling: CGFloat,
+        minHeight: CGFloat, chrome: CGFloat, resultFloor: CGFloat = 0
     ) -> CGFloat {
-        Swift.min(screenCeiling, Swift.max(roomBelowTop, Swift.max(minHeight, chrome + resultFloor)))
+        Swift.min(
+            screenCeiling,
+            Swift.max(roomBelowTop, currentHeight, Swift.max(minHeight, chrome + resultFloor))
+        )
+    }
+
+    /// Overall fit ceiling for the current phase. Streaming stays inside the
+    /// down-room allowance (the panel fills toward the screen bottom, then the
+    /// bodies scroll); a settled run may use the whole usable screen — the one
+    /// closing fit lifts the top edge by the remaining shortfall so the parked
+    /// panel opens to its content instead of stopping at a mid height.
+    static func fitHeightCeiling(
+        streaming: Bool, allowed: CGFloat, screenCeiling: CGFloat
+    ) -> CGFloat {
+        streaming ? allowed : Swift.max(allowed, screenCeiling)
     }
 
     /// A result height is fit only when it belongs to the visible mode and no
@@ -1055,6 +1139,64 @@ enum PanelLayout {
     ) -> CGFloat {
         let n = CGFloat(Swift.max(count, 1))
         return Swift.max(floor, (budget - n * cardChrome) / n)
+    }
+
+    /// Water-filling body caps, one per card in order. A naive even split
+    /// strands budget: a short engine can't use its share, and the clipped
+    /// engine next to it isn't allowed to — the stack stalls below the budget
+    /// and the window sits at a mid height no matter how much room is free.
+    ///
+    /// `needs` is each card's known natural body height, or `nil` while it is
+    /// unknown (still streaming, or clipped so the measurement is only a lower
+    /// bound). A known card at or below its running fair share is granted
+    /// `max(floor, need) + slack` and releases the rest; a collapsed card
+    /// (`need <= 0`) renders no body and consumes nothing. Every unknown or
+    /// over-share card splits whatever remains evenly — so concurrent streams
+    /// still get equal shares and a fast engine can never starve a slow one.
+    ///
+    /// `slack` is hysteresis, not padding: granting exactly `need` parks the
+    /// ceiling on the measurement, the next measurement reads as
+    /// ceiling-stopped, the need flips back to unknown, the split reverts —
+    /// and the whole window oscillates. One line of headroom keeps a satisfied
+    /// card's ceiling strictly above its content, so the classification has a
+    /// fixed point.
+    /// Absolute ceiling on any card's *auto* body height: exactly seven text
+    /// lines, so every output tops out at the same familiar size no matter how
+    /// the budget is split (a lone claimant used to grow into a
+    /// near-fullscreen card). Built from the body metrics so a capped body
+    /// always cuts on a whole line; longer content scrolls inside. The
+    /// dragged divider still customizes per engine within this bound.
+    static let maxAutoBodyHeight: CGFloat =
+        bodyVInset * 2 + 7 * bodyLineHeight + 6 * bodyLineSpacing
+
+    static func cardBodyCaps(
+        needs: [CGFloat?], budget: CGFloat, cardChrome: CGFloat, floor: CGFloat,
+        slack: CGFloat = PanelLayout.bodyLineHeight + PanelLayout.bodyLineSpacing,
+        capLimit: CGFloat = .greatestFiniteMagnitude
+    ) -> [CGFloat] {
+        guard !needs.isEmpty else { return [] }
+        var remaining = budget - CGFloat(needs.count) * cardChrome
+        var caps = [CGFloat](repeating: floor, count: needs.count)
+        var claiming = Array(needs.indices)
+        while !claiming.isEmpty {
+            let fair = remaining / CGFloat(claiming.count)
+            let satisfied = claiming.filter { i in
+                guard let need = needs[i] else { return false }
+                return need <= 0 || Swift.max(floor, need) + slack <= fair
+            }
+            if satisfied.isEmpty {
+                for i in claiming { caps[i] = Swift.min(Swift.max(floor, fair), capLimit) }
+                break
+            }
+            for i in satisfied {
+                let need = needs[i]!
+                let granted = need <= 0 ? 0 : Swift.min(Swift.max(floor, need) + slack, capLimit)
+                caps[i] = granted
+                remaining -= granted
+            }
+            claiming.removeAll { satisfied.contains($0) }
+        }
+        return caps
     }
 
     // Result body text metrics, mirroring `StreamingTextView` (system font 14,
@@ -1095,16 +1237,45 @@ enum PanelLayout {
         return Swift.min(Swift.max(measured, base), ceiling)
     }
 
+    /// Ratchet on the per-card cap: a shrinking cap can stop *future* growth
+    /// but never claws back content already rendered on screen. `budget` is
+    /// redistributed evenly across cards, so with unequal card heights the
+    /// taller card's share sits below what it already shows — without this
+    /// floor, parking the window at the screen bottom clipped that card, the
+    /// stack re-reported shorter, the window shrank, and the cycle iterated
+    /// downward. `min(displayed, measured)` releases the ratchet as soon as
+    /// the content itself gets shorter, so retries and short translations
+    /// still collapse normally.
+    static func effectiveBodyCap(cap: CGFloat, displayed: CGFloat?, measured: CGFloat?) -> CGFloat {
+        Swift.max(cap, Swift.min(displayed ?? 0, measured ?? 0))
+    }
+
+    /// The ceiling the body actually renders under: the ratcheted cap,
+    /// tightened by the user-dragged height when one is set. Exposed so the
+    /// need classification can tell a measurement that genuinely ended below
+    /// the ceiling from one that was stopped by it.
+    static func bodyRenderCeiling(
+        dragged: CGFloat?, measured: CGFloat?, displayed: CGFloat?, cap: CGFloat
+    ) -> CGFloat {
+        let effective = effectiveBodyCap(cap: cap, displayed: displayed, measured: measured)
+        return Swift.min(dragged ?? effective, effective)
+    }
+
     /// Body height with a user-dragged height taken into account.
     ///
     /// The dragged value is a *ceiling*, not a fixed height: the body still
     /// follows its content, it just stops there. Treating it as fixed meant
     /// every later short translation sat in a tall box of empty space, and the
-    /// height had to be reset by hand to get rid of it.
+    /// height had to be reset by hand to get rid of it. The cap is ratcheted
+    /// against `displayed` (see `effectiveBodyCap`), so only content changes
+    /// and the dragged divider make a body shorter — never window placement.
     static func bodyHeight(
-        dragged: CGFloat?, measured: CGFloat?, floor: CGFloat, cap: CGFloat
+        dragged: CGFloat?, measured: CGFloat?, displayed: CGFloat?,
+        floor: CGFloat, cap: CGFloat
     ) -> CGFloat {
-        let ceiling = Swift.min(dragged ?? cap, cap)
+        let ceiling = bodyRenderCeiling(
+            dragged: dragged, measured: measured, displayed: displayed, cap: cap
+        )
         return growingBodyHeight(measured: measured, floor: floor, cap: ceiling)
     }
 

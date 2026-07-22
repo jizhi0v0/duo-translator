@@ -149,6 +149,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.coordinator.debugClosePanel()
             }
         }
+        // Park the panel at a named vertical spot ("bottom" / "top" / "mid")
+        // for layout verification — the LSUIElement panel can't be dragged by
+        // synthetic mouse events.
+        center.addObserver(
+            forName: Notification.Name("dev.bobby.duo.debug.movePanel"),
+            object: nil, queue: .main
+        ) { [weak self] note in
+            let spec = (note.object as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "bottom"
+            Task { @MainActor in
+                self?.coordinator.debugMovePanel(spec)
+            }
+        }
         // Run an LLM vision OCR pass on a synthetic sample image (object =
         // optional model override, e.g. "gpt-4o"); result/error goes to the log.
         center.addObserver(
