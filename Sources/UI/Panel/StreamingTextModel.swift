@@ -103,8 +103,9 @@ final class StreamingTextModel {
                 self.revealSlice()
             }
         }
-        // .common so the reveal keeps running while the user drags or scrolls
-        // the panel, instead of freezing for the length of the gesture.
+        // .common keeps the visible stream rendering during window movement.
+        // The panel freezes geometry and scroll offsets separately, so text can
+        // continue appearing without moving the reader's viewport.
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
         // First slice now: waiting a frame would show an empty card for longer

@@ -71,6 +71,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let seed = env["UITEST_INPUT"] ?? ""
             let resultCount = Int(env["UITEST_RESULTS"] ?? "") ?? 0
             let streaming = env["UITEST_STREAMING"] == "1"
+            // Remembered-position seed ("x,topY", Cocoa coords) for the restore
+            // test — written to the screen the panel is about to open on, since
+            // dragging needs event posting the test runner may not be allowed.
+            if let raw = env["UITEST_PANEL_TOPLEFT"] {
+                let parts = raw.split(separator: ",").compactMap { Double($0) }
+                let mouse = NSEvent.mouseLocation
+                let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
+                    ?? NSScreen.main
+                if parts.count == 2, let screen {
+                    SettingsStore.shared.setPanelTopLeft(
+                        NSPoint(x: parts[0], y: parts[1]),
+                        forScreen: PanelController.screenKey(for: screen)
+                    )
+                }
+            }
             coordinator.uiTestShowPanel(
                 seed: seed,
                 resultCount: resultCount,

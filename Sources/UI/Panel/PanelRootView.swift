@@ -132,8 +132,9 @@ struct PanelRootView: View {
         .frame(maxWidth: .infinity, alignment: .top)
     }
 
-    /// The floating metrics card, positioned just below the active gauge and
-    /// clamped within the panel, over a transparent tap-catcher that dismisses.
+    /// The floating metrics card. Its custom layout measures the real popover
+    /// first, then places it below the gauge when possible or flips it above;
+    /// unlike a visual offset, placement participates in layout and hit testing.
     @ViewBuilder
     private func metricsOverlay(_ anchor: Anchor<CGRect>?) -> some View {
         if let anchor,
@@ -142,9 +143,7 @@ struct PanelRootView: View {
            let metrics = engineRun.metrics {
             GeometryReader { proxy in
                 let gauge = proxy[anchor]
-                let cardWidth: CGFloat = 240
-                let x = min(max(8, gauge.minX), max(8, proxy.size.width - cardWidth - 8))
-                ZStack(alignment: .topLeading) {
+                MetricsOverlayLayout(gauge: gauge) {
                     // Tap anywhere off the card to dismiss.
                     Color.clear
                         .contentShape(Rectangle())
@@ -155,9 +154,84 @@ struct PanelRootView: View {
                         kind: engineRun.kind,
                         requestedModel: engineRun.requestedModel
                     )
-                        .offset(x: x, y: gauge.maxY + 6)
                 }
             }
         }
+    }
+}
+
+/// Pure placement rule shared by the custom layout and unit tests.
+enum MetricsOverlayPlacement {
+    static func origin(
+        gauge: CGRect,
+        popoverSize: CGSize,
+        containerSize: CGSize,
+        margin: CGFloat = 8,
+        gap: CGFloat = 6
+    ) -> CGPoint {
+        let maxX = max(margin, containerSize.width - margin - popoverSize.width)
+        let x = min(max(gauge.minX, margin), maxX)
+
+        let below = gauge.maxY + gap
+        let above = gauge.minY - gap - popoverSize.height
+        let fitsBelow = below + popoverSize.height <= containerSize.height - margin
+        let fitsAbove = above >= margin
+        let preferredY: CGFloat
+        if fitsBelow {
+            preferredY = below
+        } else if fitsAbove {
+            preferredY = above
+        } else {
+            // Neither side fully fits (very short panel): choose the side with
+            // more room, then clamp as much of the card onscreen as possible.
+            let roomBelow = containerSize.height - margin - below
+            let roomAbove = gauge.minY - gap - margin
+            preferredY = roomAbove > roomBelow ? above : below
+        }
+        let maxY = max(margin, containerSize.height - margin - popoverSize.height)
+        let y = min(max(preferredY, margin), maxY)
+        return CGPoint(x: x, y: y)
+    }
+}
+
+/// Measures the metrics card before positioning it. Child 0 is the full-panel
+/// dismiss catcher; child 1 is the intrinsic-size popover drawn above it.
+private struct MetricsOverlayLayout: Layout {
+    let gauge: CGRect
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        guard subviews.count >= 2 else { return }
+        subviews[0].place(
+            at: bounds.origin,
+            anchor: .topLeading,
+            proposal: ProposedViewSize(width: bounds.width, height: bounds.height)
+        )
+
+        let popoverSize = subviews[1].sizeThatFits(
+            ProposedViewSize(width: 240, height: nil)
+        )
+        let local = MetricsOverlayPlacement.origin(
+            gauge: gauge,
+            popoverSize: popoverSize,
+            containerSize: bounds.size
+        )
+        subviews[1].place(
+            at: CGPoint(x: bounds.minX + local.x, y: bounds.minY + local.y),
+            anchor: .topLeading,
+            proposal: ProposedViewSize(popoverSize)
+        )
     }
 }

@@ -1,26 +1,37 @@
 import AppKit
 import SwiftUI
 
-/// Scroll view for a result body. Only overrides `scrollWheel` to keep scrolling
-/// self-contained (no chaining to the outer list); it deliberately does NOT
-/// touch `mouseDownCanMoveWindow` or replace the clip view — doing so broke text
-/// selection inside the result.
+/// Scroll view for a result body. It consumes the wheel while its own text can
+/// move, then forwards the gesture to the outer provider-list scroll view at an
+/// edge. It deliberately does NOT touch `mouseDownCanMoveWindow` or replace the
+/// clip view — doing so broke text selection inside the result.
 private final class ResultScrollView: NSScrollView {
-    /// Don't chain to the outer result list when there's nothing to scroll here,
-    /// or when already at the top/bottom edge.
     override func scrollWheel(with event: NSEvent) {
         let contentHeight = documentView?.frame.height ?? 0
         let visibleHeight = contentView.bounds.height
         if contentHeight <= visibleHeight + 1 {
-            return // nothing to scroll — swallow instead of lifting the outer list
+            forwardToOuterScrollView(event)
+            return
         }
         let y = contentView.bounds.origin.y
         let maxY = contentHeight - visibleHeight
         let dy = event.scrollingDeltaY
         if (dy > 0 && y <= 0) || (dy < 0 && y >= maxY) {
-            return // at the edge in this direction — don't chain
+            forwardToOuterScrollView(event)
+            return
         }
         super.scrollWheel(with: event)
+    }
+
+    private func forwardToOuterScrollView(_ event: NSEvent) {
+        var ancestor = superview
+        while let view = ancestor {
+            if let scrollView = view as? NSScrollView, scrollView !== self {
+                scrollView.scrollWheel(with: event)
+                return
+            }
+            ancestor = view.superview
+        }
     }
 }
 
@@ -66,9 +77,18 @@ struct StreamingTextView: NSViewRepresentable {
     /// measurement, so a finished translation can never be left at a stale
     /// height by the ceiling short-circuit.
     var settled: Bool = false
+    /// While the window is being dragged, follow-scroll must not fight the
+    /// controller's frozen scroll offsets.
+    var suppressFollow: Bool = false
+    /// Incremented by the card's jump button: scroll to the bottom once. The
+    /// reader then follows the stream for as long as it stays at the bottom.
+    var jumpToBottomToken: Int = 0
     /// Natural content height, reported as the stream grows. Opt-in: without a
     /// handler the view never measures.
     var onContentHeightChange: ((CGFloat) -> Void)?
+    /// Whether a jump-to-bottom affordance makes sense right now (the content
+    /// overflows and the reader is not at the bottom). Dispatched async.
+    var onScrollStateChange: ((Bool) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -112,6 +132,7 @@ struct StreamingTextView: NSViewRepresentable {
 
         let scrollView = ResultScrollView()
         scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.documentView = textView
         scrollView.contentView.postsBoundsChangedNotifications = true
@@ -120,6 +141,10 @@ struct StreamingTextView: NSViewRepresentable {
         context.coordinator.configureHeightReporting(
             ceiling: heightCeiling, settled: settled, handler: onContentHeightChange
         )
+        context.coordinator.configureFollow(
+            suppressed: suppressFollow, handler: onScrollStateChange
+        )
+        context.coordinator.applyJumpToken(jumpToBottomToken)
         context.coordinator.bindModel(model)
         return scrollView
     }
@@ -128,6 +153,10 @@ struct StreamingTextView: NSViewRepresentable {
         context.coordinator.configureHeightReporting(
             ceiling: heightCeiling, settled: settled, handler: onContentHeightChange
         )
+        context.coordinator.configureFollow(
+            suppressed: suppressFollow, handler: onScrollStateChange
+        )
+        context.coordinator.applyJumpToken(jumpToBottomToken)
         // Each translation run hands the view a fresh StreamingTextModel; without
         // rebinding, only the first run would ever render.
         context.coordinator.bindModel(model)
@@ -148,6 +177,10 @@ struct StreamingTextView: NSViewRepresentable {
         /// rewrap); cleared by the next report. See the guard in the report.
         private var allowsShrink = true
         private var hasSettled = false
+        private var suppressFollow = false
+        private var onScrollStateChange: ((Bool) -> Void)?
+        private var lastJumpToken = 0
+        private var lastReportedJumpVisible = false
 
         /// One-time wiring of the views.
         func setup(
@@ -161,6 +194,58 @@ struct StreamingTextView: NSViewRepresentable {
                 self, selector: #selector(frameChanged),
                 name: NSView.frameDidChangeNotification, object: textView
             )
+            if let clip = textView.enclosingScrollView?.contentView {
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(scrollBoundsChanged),
+                    name: NSView.boundsDidChangeNotification, object: clip
+                )
+            }
+        }
+
+        // MARK: Follow-the-stream
+
+        func configureFollow(suppressed: Bool, handler: ((Bool) -> Void)?) {
+            suppressFollow = suppressed
+            onScrollStateChange = handler
+        }
+
+        /// A raised token means the jump button was clicked: go to the bottom
+        /// once; staying there makes subsequent appends follow. A lower token
+        /// is a recreated SwiftUI view resyncing — never a jump.
+        func applyJumpToken(_ token: Int) {
+            guard token != lastJumpToken else { return }
+            let increased = token > lastJumpToken
+            lastJumpToken = token
+            guard increased else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.textView?.scrollToEndOfDocument(nil)
+                self?.reportScrollState()
+            }
+        }
+
+        @objc private func scrollBoundsChanged() {
+            reportScrollState()
+        }
+
+        /// (overflowing, atBottom) for the current viewport.
+        private func viewportState() -> (overflowing: Bool, atBottom: Bool) {
+            guard let textView, let clip = textView.enclosingScrollView?.contentView else {
+                return (false, true)
+            }
+            let docHeight = textView.frame.height
+            let visible = clip.bounds
+            let overflowing = docHeight > visible.height + 1
+            let atBottom = visible.origin.y >= docHeight - visible.height - 4
+            return (overflowing, atBottom)
+        }
+
+        private func reportScrollState() {
+            guard let handler = onScrollStateChange else { return }
+            let state = viewportState()
+            let jumpVisible = state.overflowing && !state.atBottom
+            guard jumpVisible != lastReportedJumpVisible else { return }
+            lastReportedJumpVisible = jumpVisible
+            DispatchQueue.main.async { handler(jumpVisible) }
         }
 
         /// Re-measure after a real width change (panel width switches between
@@ -269,13 +354,17 @@ struct StreamingTextView: NSViewRepresentable {
 
         private func append(_ chunk: String) {
             guard let textView, let storage = textView.textStorage else { return }
+            // Terminal-style follow: only when the reader already parked at the
+            // bottom of an overflowing body does the view chase the stream. The
+            // default reading position (the top) never moves on its own.
+            let state = viewportState()
+            let follow = !suppressFollow && state.overflowing && state.atBottom
             storage.beginEditing()
             storage.append(NSAttributedString(string: chunk, attributes: attributes))
             storage.endEditing()
-            // A translation is read top-down, so don't follow the stream to the
-            // bottom — leave the scroll position where it is (at the top for a
-            // fresh run) so the reader starts from the beginning.
+            if follow { textView.scrollToEndOfDocument(nil) }
             scheduleHeightReport(force: false)
+            reportScrollState()
         }
 
         private func resetText() {
@@ -293,6 +382,7 @@ struct StreamingTextView: NSViewRepresentable {
             reachedHeightCeiling = false
             allowsShrink = true
             scheduleHeightReport(force: true)
+            reportScrollState()
         }
     }
 }
@@ -320,7 +410,15 @@ struct PageReaderView: NSViewRepresentable {
     /// Once natural content reaches this ceiling, further appends no longer need
     /// expensive whole-document height measurements; the reader already scrolls.
     let heightCeiling: CGFloat
+    /// While the window is being dragged, follow-scroll must not fight the
+    /// controller's frozen scroll offsets.
+    var suppressFollow: Bool = false
+    /// Incremented by the page's jump button: scroll to the bottom once.
+    var jumpToBottomToken: Int = 0
     var onContentHeightChange: ((CGFloat) -> Void)?
+    /// Whether a jump-to-bottom affordance makes sense (content overflows and
+    /// the reader is not at the bottom). Dispatched async.
+    var onScrollStateChange: ((Bool) -> Void)?
 
     func makeCoordinator() -> ReaderCoordinator { ReaderCoordinator() }
 
@@ -341,12 +439,17 @@ struct PageReaderView: NSViewRepresentable {
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
         scrollView.hasHorizontalScroller = false
         scrollView.drawsBackground = false
         scrollView.documentView = textView
         scrollView.contentView.postsBoundsChangedNotifications = true
 
         context.coordinator.setup(textView: textView, onContentHeightChange: onContentHeightChange)
+        context.coordinator.configureFollow(
+            suppressed: suppressFollow, handler: onScrollStateChange
+        )
+        context.coordinator.applyJumpToken(jumpToBottomToken)
         context.coordinator.configure(
             model: model,
             original: original,
@@ -361,6 +464,10 @@ struct PageReaderView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.onContentHeightChange = onContentHeightChange
+        context.coordinator.configureFollow(
+            suppressed: suppressFollow, handler: onScrollStateChange
+        )
+        context.coordinator.applyJumpToken(jumpToBottomToken)
         context.coordinator.configure(
             model: model,
             original: original,
@@ -390,6 +497,10 @@ struct PageReaderView: NSViewRepresentable {
         /// Set where the document may legitimately get shorter (a new run, or a
         /// rewrap); cleared by the next report. See the guard in the report.
         private var allowsShrink = true
+        private var suppressFollow = false
+        private var onScrollStateChange: ((Bool) -> Void)?
+        private var lastJumpToken = 0
+        private var lastReportedJumpVisible = false
 
         func setup(textView: NSTextView, onContentHeightChange: ((CGFloat) -> Void)?) {
             self.textView = textView
@@ -399,6 +510,54 @@ struct PageReaderView: NSViewRepresentable {
                 self, selector: #selector(frameChanged),
                 name: NSView.frameDidChangeNotification, object: textView
             )
+            if let clip = textView.enclosingScrollView?.contentView {
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(scrollBoundsChanged),
+                    name: NSView.boundsDidChangeNotification, object: clip
+                )
+            }
+        }
+
+        // MARK: Follow-the-stream (same rules as the card coordinator)
+
+        func configureFollow(suppressed: Bool, handler: ((Bool) -> Void)?) {
+            suppressFollow = suppressed
+            onScrollStateChange = handler
+        }
+
+        func applyJumpToken(_ token: Int) {
+            guard token != lastJumpToken else { return }
+            let increased = token > lastJumpToken
+            lastJumpToken = token
+            guard increased else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.textView?.scrollToEndOfDocument(nil)
+                self?.reportScrollState()
+            }
+        }
+
+        @objc private func scrollBoundsChanged() {
+            reportScrollState()
+        }
+
+        private func viewportState() -> (overflowing: Bool, atBottom: Bool) {
+            guard let textView, let clip = textView.enclosingScrollView?.contentView else {
+                return (false, true)
+            }
+            let docHeight = textView.frame.height
+            let visible = clip.bounds
+            let overflowing = docHeight > visible.height + 1
+            let atBottom = visible.origin.y >= docHeight - visible.height - 4
+            return (overflowing, atBottom)
+        }
+
+        private func reportScrollState() {
+            guard let handler = onScrollStateChange else { return }
+            let state = viewportState()
+            let jumpVisible = state.overflowing && !state.atBottom
+            guard jumpVisible != lastReportedJumpVisible else { return }
+            lastReportedJumpVisible = jumpVisible
+            DispatchQueue.main.async { handler(jumpVisible) }
         }
 
         @objc private func frameChanged() {
@@ -464,6 +623,7 @@ struct PageReaderView: NSViewRepresentable {
             allowsShrink = true
             if resetScroll { textView.scroll(.zero) }
             scheduleHeightReport(force: true)
+            reportScrollState()
         }
 
         private func append(_ chunk: String) {
@@ -474,8 +634,12 @@ struct PageReaderView: NSViewRepresentable {
             // append-only TextKit path for every mode. Height fitting is
             // throttled and stops after the scroll ceiling, while glyphs still
             // land immediately so the visible stream is never incomplete.
+            let state = viewportState()
+            let follow = !suppressFollow && state.overflowing && state.atBottom
             applyProjection()
+            if follow { textView?.scrollToEndOfDocument(nil) }
             scheduleHeightReport(force: false)
+            reportScrollState()
         }
 
         /// The full document for the current state: placeholder before the

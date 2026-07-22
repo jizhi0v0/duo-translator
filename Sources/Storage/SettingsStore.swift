@@ -24,6 +24,7 @@ final class SettingsStore: ObservableObject {
         static let resultBodyHeight = "resultBodyHeight"
         static let resultBodyHeightByEngine = "resultBodyHeightByEngine"
         static let ocrVisionLevel = "ocrVisionLevel"
+        static let panelTopLeftByScreen = "panelTopLeftByScreen"
     }
 
     @Published var firstLanguage: String {
@@ -66,6 +67,12 @@ final class SettingsStore: ObservableObject {
     @Published var resultBodyHeightByEngine: [String: Double] {
         didSet { defaults.set(resultBodyHeightByEngine, forKey: Keys.resultBodyHeightByEngine) }
     }
+    /// Panel top-left corner `[x, top edge y]` (Cocoa coords) the user last
+    /// dragged the panel to, keyed by screen (`PanelController.screenKey`).
+    /// Missing key = the default top-center placement on that screen.
+    @Published var panelTopLeftByScreen: [String: [Double]] {
+        didSet { defaults.set(panelTopLeftByScreen, forKey: Keys.panelTopLeftByScreen) }
+    }
     /// Active OCR provider: empty for the built-in Apple Vision, or a provider
     /// UUID string for a vision-capable LLM. Resolved by `OCRFactory`, which
     /// falls back to Apple when the id no longer matches an OCR-capable provider.
@@ -92,6 +99,8 @@ final class SettingsStore: ObservableObject {
         resultBodyHeight = defaults.double(forKey: Keys.resultBodyHeight)
         resultBodyHeightByEngine =
             defaults.dictionary(forKey: Keys.resultBodyHeightByEngine) as? [String: Double] ?? [:]
+        panelTopLeftByScreen =
+            defaults.dictionary(forKey: Keys.panelTopLeftByScreen) as? [String: [Double]] ?? [:]
         ocrVisionLevel = defaults.string(forKey: Keys.ocrVisionLevel) ?? "accurate"
 
         // Provider/config: load the current schema, else migrate from the legacy
@@ -163,6 +172,9 @@ final class SettingsStore: ObservableObject {
         resultBodyHeightByEngine =
             defaults.dictionary(forKey: Keys.resultBodyHeightByEngine) as? [String: Double]
             ?? resultBodyHeightByEngine
+        panelTopLeftByScreen =
+            defaults.dictionary(forKey: Keys.panelTopLeftByScreen) as? [String: [Double]]
+            ?? panelTopLeftByScreen
         ocrVisionLevel = defaults.string(forKey: Keys.ocrVisionLevel) ?? ocrVisionLevel
         ocrProviderID = defaults.string(forKey: Keys.ocrProviderID) ?? ocrProviderID
         ocrModel = defaults.string(forKey: Keys.ocrModel) ?? ocrModel
@@ -300,6 +312,25 @@ final class SettingsStore: ObservableObject {
     /// test starts from the automatic behaviour.
     static func resetForUITests() {
         shared.clearAllResultBodyHeights()
+        shared.panelTopLeftByScreen.removeAll()
+    }
+
+    // MARK: - Panel position
+
+    /// Where the panel should open on the given screen: the corner the user
+    /// last dragged it to, or nil for the default top-center placement.
+    func panelTopLeft(forScreen key: String) -> NSPoint? {
+        guard let pair = panelTopLeftByScreen[key], pair.count == 2 else { return nil }
+        return NSPoint(x: pair[0], y: pair[1])
+    }
+
+    func setPanelTopLeft(_ point: NSPoint, forScreen key: String) {
+        panelTopLeftByScreen[key] = [Double(point.x), Double(point.y)]
+    }
+
+    /// Back to the default placement for this screen (toolbar double-click).
+    func clearPanelTopLeft(forScreen key: String) {
+        panelTopLeftByScreen[key] = nil
     }
 
     /// Height the card for `engineID` should use: its own dragged height, else

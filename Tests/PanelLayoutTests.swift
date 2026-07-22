@@ -7,6 +7,241 @@ import XCTest
 /// whole range so a regression that breaks the UI at some length is caught.
 final class PanelLayoutTests: XCTestCase {
 
+    // MARK: - Metrics tips placement
+
+    func testMetricsTipsUsesBelowWhenThereIsRoom() {
+        let origin = MetricsOverlayPlacement.origin(
+            gauge: CGRect(x: 100, y: 50, width: 16, height: 16),
+            popoverSize: CGSize(width: 240, height: 220),
+            containerSize: CGSize(width: 480, height: 600)
+        )
+        XCTAssertEqual(origin.y, 72)
+    }
+
+    func testMetricsTipsFlipsAboveNearPanelBottom() {
+        let gauge = CGRect(x: 100, y: 500, width: 16, height: 16)
+        let origin = MetricsOverlayPlacement.origin(
+            gauge: gauge,
+            popoverSize: CGSize(width: 240, height: 220),
+            containerSize: CGSize(width: 480, height: 600)
+        )
+        XCTAssertEqual(origin.y, gauge.minY - 6 - 220)
+        XCTAssertGreaterThanOrEqual(origin.y, 8)
+    }
+
+    func testMetricsTipsClampsHorizontallyInsidePanel() {
+        let origin = MetricsOverlayPlacement.origin(
+            gauge: CGRect(x: 470, y: 50, width: 10, height: 10),
+            popoverSize: CGSize(width: 240, height: 220),
+            containerSize: CGSize(width: 480, height: 600)
+        )
+        XCTAssertEqual(origin.x, 232)
+    }
+
+    // MARK: - Result-list scroll viewport
+
+    func testResultListGrowsToContentBelowBudget() {
+        XCTAssertEqual(PanelLayout.scrollViewportHeight(content: 180, budget: 300), 180)
+    }
+
+    func testResultListCapsAtBudgetWhenCardsOverflow() {
+        XCTAssertEqual(PanelLayout.scrollViewportHeight(content: 400, budget: 271), 271)
+    }
+
+    func testResultListViewportNeverBecomesNegative() {
+        XCTAssertEqual(PanelLayout.scrollViewportHeight(content: 400, budget: -20), 0)
+    }
+
+    // MARK: - Window drag event order
+
+    func testWindowDragIsActiveWhileMouseDownIsNewest() {
+        XCTAssertTrue(WindowDragState.isActive(downEventAge: 0.01, upEventAge: 3))
+    }
+
+    func testWindowDragEndsWhenMouseUpBecomesNewest() {
+        XCTAssertFalse(WindowDragState.isActive(downEventAge: 3, upEventAge: 0.01))
+    }
+
+    func testWindowDragAppliesExactPointerDeltaWithoutScreenClamp() {
+        let origin = WindowDragState.windowOrigin(
+            startOrigin: NSPoint(x: 720, y: 493),
+            startPointer: NSPoint(x: 900, y: 900),
+            currentPointer: NSPoint(x: 546, y: -100)
+        )
+        XCTAssertEqual(origin.x, 366)
+        XCTAssertEqual(origin.y, -507)
+    }
+
+    func testWindowDragStopsBeforeDockAndMenuBar() {
+        let visible = NSRect(x: 0, y: 62, width: 1920, height: 988)
+        let size = NSSize(width: 480, height: 709)
+
+        let belowDock = WindowDragState.constrainedOrigin(
+            proposed: NSPoint(x: 300, y: -500),
+            windowSize: size,
+            visibleFrame: visible,
+            padding: 24
+        )
+        XCTAssertEqual(belowDock.y, 86)
+
+        let aboveMenuBar = WindowDragState.constrainedOrigin(
+            proposed: NSPoint(x: 300, y: 900),
+            windowSize: size,
+            visibleFrame: visible,
+            padding: 24
+        )
+        XCTAssertEqual(aboveMenuBar.y, 317)
+    }
+
+    func testWindowDragCanSitFlushAgainstUsableScreenEdge() {
+        let visible = NSRect(x: 0, y: 62, width: 1920, height: 988)
+        let origin = WindowDragState.constrainedOrigin(
+            proposed: NSPoint(x: -100, y: -500),
+            windowSize: NSSize(width: 480, height: 709),
+            visibleFrame: visible,
+            padding: 0
+        )
+        XCTAssertEqual(origin.x, visible.minX)
+        XCTAssertEqual(origin.y, visible.minY)
+    }
+
+    // MARK: - Fit allowance at rest (user-positioned panel)
+
+    func testAllowedFitUsesFullCeilingFromDefaultTopPosition() {
+        // Default opening puts the top at the padded screen top, so the room
+        // below it covers the whole usable ceiling.
+        XCTAssertEqual(
+            PanelLayout.allowedFitHeight(
+                roomBelowTop: 1031, screenCeiling: 1007, minHeight: 220, chrome: 246
+            ),
+            1007
+        )
+    }
+
+    func testAllowedFitPreservesDraggedTopEdge() {
+        // Panel dragged to mid-screen: growth may fill only the room below the
+        // chosen top edge, so a long result can never shove the panel back up.
+        XCTAssertEqual(
+            PanelLayout.allowedFitHeight(
+                roomBelowTop: 475, screenCeiling: 1007, minHeight: 220, chrome: 246
+            ),
+            475
+        )
+    }
+
+    func testDraggedLowPanelFitsWithinRoomBelowTopInsteadOfJumping() {
+        // The release-time catch-up fit for a mid-screen panel with a long
+        // streamed result: height stops at the room below the top edge.
+        let allowed = PanelLayout.allowedFitHeight(
+            roomBelowTop: 475, screenCeiling: 1007, minHeight: 220, chrome: 246
+        )
+        let desired = PanelLayout.windowHeight(
+            chrome: 240, result: 761, buffer: 6, floor: 220, ceiling: allowed
+        )
+        XCTAssertEqual(desired, 475)
+    }
+
+    func testAllowedFitLiftsOnlyByTheMinimumHeightShortfall() {
+        XCTAssertEqual(
+            PanelLayout.allowedFitHeight(
+                roomBelowTop: 100, screenCeiling: 1007, minHeight: 220, chrome: 150
+            ),
+            220
+        )
+    }
+
+    func testAllowedFitNeverClipsTheChrome() {
+        // Parked at the bottom while the input grew taller than the remaining
+        // room: the panel may lift just far enough to keep the chrome visible.
+        XCTAssertEqual(
+            PanelLayout.allowedFitHeight(
+                roomBelowTop: 250, screenCeiling: 1007, minHeight: 220, chrome: 326
+            ),
+            326
+        )
+    }
+
+    func testAllowedFitKeepsAMinimumResultStripWhenParkedAtTheBottom() {
+        // With cards on screen the result area may never squeeze to zero: the
+        // panel lifts by exactly the chrome+strip shortfall.
+        XCTAssertEqual(
+            PanelLayout.allowedFitHeight(
+                roomBelowTop: 285, screenCeiling: 1007, minHeight: 220,
+                chrome: 246, resultFloor: 150
+            ),
+            396
+        )
+    }
+
+    func testAllowedFitWithoutResultsReservesNoStrip() {
+        XCTAssertEqual(
+            PanelLayout.allowedFitHeight(
+                roomBelowTop: 285, screenCeiling: 1007, minHeight: 220, chrome: 246
+            ),
+            285
+        )
+    }
+
+    // MARK: - Cross-screen drag
+
+    func testDragStaysFullyInsideASingleScreen() {
+        let visible = NSRect(x: 0, y: 62, width: 1920, height: 988)
+        let origin = WindowDragState.dragOrigin(
+            proposed: NSPoint(x: -100, y: -500),
+            windowSize: NSSize(width: 480, height: 709),
+            toolbarBandHeight: 36,
+            pointerScreen: visible,
+            screens: [visible]
+        )
+        XCTAssertEqual(origin.x, visible.minX)
+        XCTAssertEqual(origin.y, visible.minY)
+    }
+
+    func testDragStraddlesEqualSideBySideScreensWithoutJumping() {
+        let a = NSRect(x: 0, y: 62, width: 1920, height: 988)
+        let b = NSRect(x: 1920, y: 62, width: 1920, height: 988)
+        // Window half on each screen: the proposed origin is kept as-is
+        // instead of teleporting into the pointer's screen.
+        let origin = WindowDragState.dragOrigin(
+            proposed: NSPoint(x: 1700, y: 300),
+            windowSize: NSSize(width: 480, height: 500),
+            toolbarBandHeight: 36,
+            pointerScreen: b,
+            screens: [a, b]
+        )
+        XCTAssertEqual(origin.x, 1700)
+        XCTAssertEqual(origin.y, 300)
+    }
+
+    func testDragStopsAtTheOuterEdgeOfTheArrangement() {
+        let a = NSRect(x: 0, y: 62, width: 1920, height: 988)
+        let b = NSRect(x: 1920, y: 62, width: 1920, height: 988)
+        let origin = WindowDragState.dragOrigin(
+            proposed: NSPoint(x: 3600, y: 300),
+            windowSize: NSSize(width: 480, height: 500),
+            toolbarBandHeight: 36,
+            pointerScreen: b,
+            screens: [a, b]
+        )
+        XCTAssertEqual(origin.x, 3840 - 480)
+    }
+
+    func testDragKeepsWindowOffScreensThatCannotShowItsToolbar() {
+        // A short laptop screen beside a tall external: at a height that only
+        // exists on the external, the window cannot straddle into the laptop.
+        let tall = NSRect(x: 0, y: 0, width: 1920, height: 1050)
+        let laptop = NSRect(x: 1920, y: 0, width: 1512, height: 800)
+        let origin = WindowDragState.dragOrigin(
+            proposed: NSPoint(x: 1800, y: 500),
+            windowSize: NSSize(width: 480, height: 500),
+            toolbarBandHeight: 36,
+            pointerScreen: tall,
+            screens: [tall, laptop]
+        )
+        XCTAssertEqual(origin.x, 1920 - 480)
+        XCTAssertEqual(origin.y, 500)
+    }
+
     // MARK: - Page-mode output height
 
     func testUnmeasuredPageOutputUsesLoadingFloorInsteadOfFullBudget() {

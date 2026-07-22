@@ -15,6 +15,9 @@ struct ResultCardView: View {
     /// several providers share the window (keeping every header visible);
     /// overflow scrolls internally via TextKit 2.
     var maxBodyHeight: CGFloat
+    /// Window movement freezes visible card geometry. A TextKit height report
+    /// already queued before mouse-down must not grow this body mid-drag.
+    var layoutFrozen: Bool
     var onRetry: () -> Void
     /// Apple language-pack download, invoked from the in-card prompt.
     var onDownloadApple: (String?, String) -> Void
@@ -27,6 +30,13 @@ struct ResultCardView: View {
     /// started from. Both nil when no drag is in progress.
     @State private var dragHeight: CGFloat?
     @State private var dragStartHeight: CGFloat?
+    @State private var lastDisplayedBodyHeight: CGFloat = 40
+    /// The body overflows and the reader is not at the bottom — the moment a
+    /// "jump to the latest text" affordance is meaningful.
+    @State private var canJumpToBottom = false
+    /// Incremented per click; the AppKit coordinator scrolls to the bottom
+    /// once, after which staying there makes the view follow the stream.
+    @State private var jumpToken = 0
 
     /// Viewport reserved as soon as the card appears, before any measurement:
     /// a single line, just enough for the "翻译中…" placeholder. The body grows
@@ -56,12 +66,18 @@ struct ResultCardView: View {
                         model: engineRun.stream,
                         heightCeiling: maxBodyHeight,
                         settled: !isStreaming,
+                        suppressFollow: layoutFrozen,
+                        jumpToBottomToken: jumpToken,
                         // Safe to assign straight into @State: the text view always
                         // reports from a dispatched block, never inside a SwiftUI
                         // update pass.
-                        onContentHeightChange: { height in measuredBodyHeight = height }
+                        onContentHeightChange: { height in measuredBodyHeight = height },
+                        onScrollStateChange: { canJumpToBottom = $0 }
                     )
-                    .frame(height: bodyHeight)
+                    .frame(height: displayedBodyHeight)
+                    .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { height in
+                        if !layoutFrozen { lastDisplayedBodyHeight = height }
+                    }
                     .overlay(alignment: .topLeading) {
                         if isAwaitingContent {
                             // Match the streamed text exactly — same 14pt size and
@@ -75,6 +91,16 @@ struct ResultCardView: View {
                                 .foregroundStyle(.tertiary)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 8)
+                        }
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        // Offered only mid-stream: reading stays top-anchored by
+                        // default, and this one click parks the reader at the
+                        // bottom, where it then follows the incoming text.
+                        if canJumpToBottom, isStreaming {
+                            FollowStreamButton(identifier: "result.followStream") {
+                                jumpToken += 1
+                            }
                         }
                     }
                     resizeDivider
@@ -211,6 +237,10 @@ struct ResultCardView: View {
             floor: Self.minBodyHeight,
             cap: maxBodyHeight
         )
+    }
+
+    private var displayedBodyHeight: CGFloat {
+        layoutFrozen ? lastDisplayedBodyHeight : bodyHeight
     }
 
     /// The divider above the footer doubles as a resize handle: drag it to set
@@ -355,6 +385,31 @@ struct ResultCardView: View {
                     .opacity(0.75)
             }
         }
+    }
+}
+
+/// Floating "jump to the latest text" affordance shared by the result cards
+/// and the page reader. Small, material-backed, bottom-trailing; clicking it
+/// scrolls the body to the end, where the reader then follows the stream.
+struct FollowStreamButton: View {
+    var identifier: String
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.down.to.line.compact")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(5)
+                .background(.thinMaterial, in: Circle())
+                .overlay(Circle().strokeBorder(Color.secondary.opacity(0.2)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, 14)
+        .padding(.bottom, 6)
+        .help("跳到最新内容并跟随")
+        .accessibilityIdentifier(identifier)
     }
 }
 

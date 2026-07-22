@@ -2,7 +2,17 @@ import AppKit
 import SwiftUI
 
 final class TranslatorPanel: NSPanel {
+    static let screenPadding: CGFloat = 24
+    /// Approximate height of the toolbar rows at the top of the panel — the
+    /// window's grab region. Cross-screen dragging keeps this band reachable.
+    static let toolbarBandHeight: CGFloat = 36
     var onEscape: (() -> Void)?
+    var onDragBegan: (() -> Void)?
+    var onDragMoved: (() -> Void)?
+    var onDragEnded: (() -> Void)?
+    /// Double-click on the toolbar's empty drag area: back to the default
+    /// placement (mirrors the card divider's double-click-to-auto).
+    var onDragHandleDoubleClick: (() -> Void)?
 
     override var canBecomeKey: Bool { true }
 
@@ -24,14 +34,75 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// AppKit view that starts a window drag on mouse-down. Placed behind the
-/// toolbar row (and only there), it makes the top chrome the panel's single
-/// drag region; buttons layered above it still receive their own clicks.
+/// AppKit view that moves the window by the pointer's exact screen-space delta.
+/// It deliberately does not call `NSWindow.performDrag(with:)`: that hands the
+/// gesture to WindowServer, which constrains a titled window back toward a
+/// screen when the pointer keeps moving off-screen. Placed behind the toolbar
+/// row, this remains the panel's single drag region.
 struct WindowDragHandle: NSViewRepresentable {
     final class DragView: NSView {
+        private var startMouseLocation: NSPoint?
+        private var startWindowOrigin: NSPoint?
+
         override func mouseDown(with event: NSEvent) {
-            window?.performDrag(with: event)
+            guard let panel = window as? TranslatorPanel else { return }
+            if event.clickCount == 2 {
+                startMouseLocation = nil
+                startWindowOrigin = nil
+                panel.onDragHandleDoubleClick?()
+                return
+            }
+            startMouseLocation = NSEvent.mouseLocation
+            startWindowOrigin = panel.frame.origin
+            panel.onDragBegan?()
         }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let panel = window as? TranslatorPanel,
+                  let startMouseLocation,
+                  let startWindowOrigin else { return }
+            let pointer = NSEvent.mouseLocation
+            let proposed = WindowDragState.windowOrigin(
+                startOrigin: startWindowOrigin,
+                startPointer: startMouseLocation,
+                currentPointer: pointer
+            )
+            let screen = NSScreen.screens.first {
+                NSMouseInRect(pointer, $0.frame, false)
+            } ?? panel.screen ?? NSScreen.main
+            let origin = screen.map {
+                WindowDragState.dragOrigin(
+                    proposed: proposed,
+                    windowSize: panel.frame.size,
+                    toolbarBandHeight: TranslatorPanel.toolbarBandHeight,
+                    pointerScreen: $0.visibleFrame,
+                    screens: NSScreen.screens.map(\.visibleFrame)
+                )
+            } ?? proposed
+            // Whole-pixel origins: trackpad deltas are fractional, and a
+            // sub-pixel window origin shimmers text on non-Retina displays.
+            let aligned = NSPoint(x: origin.x.rounded(), y: origin.y.rounded())
+            // At a screen edge the pointer can keep moving while the constrained
+            // window origin stays unchanged. Re-sending that same frame causes
+            // AppKit to relayout first-responder text/scroll views, which can
+            // autoscroll their contents even though the window is stationary.
+            guard abs(aligned.x - panel.frame.origin.x) > 0.5
+                    || abs(aligned.y - panel.frame.origin.y) > 0.5 else { return }
+            panel.setFrameOrigin(aligned)
+            panel.onDragMoved?()
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            endDrag()
+        }
+
+        private func endDrag() {
+            guard startMouseLocation != nil else { return }
+            startMouseLocation = nil
+            startWindowOrigin = nil
+            (window as? TranslatorPanel)?.onDragEnded?()
+        }
+
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     }
 
@@ -78,6 +149,37 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// Set when the new mode's width is installed before its first height has
     /// arrived. While set, `refit` holds the current window height.
     private var awaitingResultMeasurementForPageMode: Bool?
+    /// Interactive window-move lifecycle. Moving a window is not an AppKit live
+    /// resize, so `refit` keys off this phase instead: `.dragging` while the
+    /// pointer is held (window frame, card geometry and scroll offsets all
+    /// frozen; the stream keeps rendering inside those fixed viewports), then
+    /// `.settling` for the short window in which SwiftUI/TextKit publish the
+    /// measurements cached during the gesture, consumed by one catch-up fit.
+    /// Only `.idle` may mutate window geometry.
+    private enum WindowDragPhase { case idle, dragging, settling }
+    private var windowDragPhase: WindowDragPhase = .idle
+    /// Invalidates a superseded gesture's pending settle turns: re-grabbing the
+    /// panel during `.settling` must not let the previous gesture's async
+    /// blocks unfreeze the new drag mid-hold.
+    private var windowDragGeneration = 0
+    /// Fallback for a mouse-up lost during deactivation: the normal path ends
+    /// directly in `DragView.mouseUp(with:)`.
+    private var windowDragReleasePoller: Timer?
+    /// AppKit scroll views can autoscroll when a held window-drag pointer moves
+    /// beyond their visible bounds. Snapshot every scroll position at mouse-down
+    /// and restore it for the entire gesture, so a window drag can never mutate
+    /// input/result reading positions.
+    @MainActor
+    private final class FrozenScrollPosition {
+        weak var scrollView: NSScrollView?
+        let origin: NSPoint
+
+        init(scrollView: NSScrollView) {
+            self.scrollView = scrollView
+            self.origin = scrollView.contentView.bounds.origin
+        }
+    }
+    private var frozenScrollPositions: [ObjectIdentifier: FrozenScrollPosition] = [:]
 
     /// Initial estimate for the chrome above the result list; replaced by a
     /// live measurement once the view lays out.
@@ -89,13 +191,18 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// pulls in tight instead of leaving a blank block under the placeholder.
     private static let minFittedHeight: CGFloat = 220
     /// Margin kept above and below the panel when it fills a tall screen.
-    private static let screenPadding: CGFloat = 24
+    private static let screenPadding = TranslatorPanel.screenPadding
     /// Small rounding-safety slack added to the fitted height so a sub-pixel
     /// short measurement can't clip the bottom card's footer. Kept minimal: the
     /// content measurement tracks the real rendered height exactly, so anything
     /// larger just shows as dead space below the last card. If a late-arriving
     /// measurement is genuinely taller, `refit` grows again to match.
     private static let fitBuffer: CGFloat = 6
+    /// Smallest result strip kept visible while cards exist: one card's chrome
+    /// (90) + a one-line body (40) + the list's vertical padding (20). A panel
+    /// parked at the very bottom lifts by this shortfall instead of squeezing
+    /// the result area to zero height.
+    private static let minVisibleResultStrip: CGFloat = 150
 
     override init() {
         super.init()
@@ -116,6 +223,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         // dragging is explicitly off: it treated any unclaimed drag — notably
         // on the result scrollbars — as a window move, so dragging a scrollbar
         // dragged the whole panel instead of scrolling.
+        panel.isMovable = false
         panel.isMovableByWindowBackground = false
         // Hide all native traffic-light buttons: on this transparent glass panel
         // the red close dot floated detached in the top-left corner. The panel
@@ -144,6 +252,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.minSize = NSSize(width: 304, height: 120)
         panel.delegate = self
         panel.onEscape = { [weak self] in self?.close() }
+        panel.onDragBegan = { [weak self] in self?.beginWindowDrag() }
+        panel.onDragMoved = { [weak self] in self?.restoreScrollPositions() }
+        panel.onDragEnded = { [weak self] in self?.finishWindowDrag() }
+        panel.onDragHandleDoubleClick = { [weak self] in self?.resetPanelPosition() }
 
         let root = PanelRootView(
             viewModel: viewModel,
@@ -331,6 +443,12 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// Order the panel on screen and fit it to the current content. Shared by the
     /// input / OCR presentations so both center, key, focus and refit consistently.
     private func presentPanel() {
+        // A newly opened panel returns to automatic content fitting. A drag
+        // during the previous visible session must not leak its frozen state
+        // into this presentation.
+        if !panel.isVisible {
+            cancelWindowDrag()
+        }
         // Each fresh presentation starts in the compact card mode; page mode is
         // an explicit per-session toggle, not a sticky window state.
         viewModel.pageMode = false
@@ -339,7 +457,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         // between uses, but its content and fitted size are still there — re-
         // showing must keep them, not snap back to the default size.
         if !panel.isVisible, viewModel.run.runs.isEmpty {
-            centerOnActiveScreen()
+            placeOnActiveScreen()
         }
         // Don't force the height here. When a real translation starts, `refit`
         // resizes to fit the new content; when a hotkey fires with nothing to
@@ -356,6 +474,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     func close() {
+        cancelWindowDrag()
         viewModel.run.cancelAll()
         // Closing the panel ends the OCR session too: drop the image attachment.
         viewModel.ocr = nil
@@ -424,20 +543,34 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     /// Place the panel on whichever screen the pointer is on (falls back to the
-    /// main screen), horizontally centered with its top edge in the upper
-    /// portion of the screen. The window is top-anchored, so results stream in
-    /// by growing downward into the space below from here.
-    private func centerOnActiveScreen() {
+    /// main screen): at the position the user last dragged it to on that screen,
+    /// else horizontally centered with the top edge at the padded screen top.
+    /// The window is top-anchored, so results stream in by growing downward.
+    private func placeOnActiveScreen() {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-        guard let visible = screen?.visibleFrame else { return }
-
+        guard let screen else { return }
+        let visible = screen.visibleFrame
         let size = Self.defaultSize
-        // Top edge ~8% down. The panel's growth ceiling is the room *below* this
-        // edge (the top never moves once placed), so opening higher is what buys
-        // the cards their height: at 16% two providers capped around 11 lines
-        // each, at 8% around 13.
-        let topY = visible.maxY - visible.height * 0.08
+
+        if let saved = SettingsStore.shared.panelTopLeft(forScreen: Self.screenKey(for: screen)) {
+            // Clamp a stale corner (resolution/arrangement change since it was
+            // saved) back inside instead of opening off-screen.
+            let origin = WindowDragState.constrainedOrigin(
+                proposed: NSPoint(x: saved.x, y: saved.y - size.height),
+                windowSize: size,
+                visibleFrame: visible,
+                padding: 0
+            )
+            panel.setFrame(NSRect(origin: origin, size: size), display: false)
+            Log.app.notice("面板位置: 恢复 (x=\(Int(origin.x), privacy: .public), top=\(Int(origin.y + size.height), privacy: .public)) @\(Self.screenKey(for: screen), privacy: .public)")
+            return
+        }
+
+        // Default: open at the padded top so even the maximum fitted height
+        // reaches exactly to the padded bottom — no later vertical correction,
+        // so every user-chosen position can be preserved.
+        let topY = visible.maxY - Self.screenPadding
         let origin = NSPoint(
             x: visible.midX - size.width / 2,
             y: topY - size.height
@@ -445,42 +578,86 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.setFrame(NSRect(origin: origin, size: size), display: false)
     }
 
+    /// Stable identity for a screen across launches: the CoreGraphics display
+    /// id, falling back to the pixel size when unavailable.
+    static func screenKey(for screen: NSScreen) -> String {
+        if let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            return "display-\(id.uint32Value)"
+        }
+        return "screen-\(Int(screen.frame.width))x\(Int(screen.frame.height))"
+    }
+
+    /// Persist where the user put the panel (top-left corner, per screen) so
+    /// the next fresh presentation opens right there.
+    private func saveDraggedPanelPosition() {
+        guard let screen = panelScreen else { return }
+        let frame = panel.frame
+        SettingsStore.shared.setPanelTopLeft(
+            NSPoint(x: frame.origin.x, y: frame.maxY),
+            forScreen: Self.screenKey(for: screen)
+        )
+        Log.app.notice("面板位置: 记住 (x=\(Int(frame.origin.x), privacy: .public), top=\(Int(frame.maxY), privacy: .public)) @\(Self.screenKey(for: screen), privacy: .public)")
+    }
+
+    /// Double-click on the toolbar's empty drag area: forget the remembered
+    /// position for this screen and go back to the default top-center spot.
+    private func resetPanelPosition() {
+        cancelWindowDrag()
+        guard let screen = panelScreen else { return }
+        SettingsStore.shared.clearPanelTopLeft(forScreen: Self.screenKey(for: screen))
+        let visible = screen.visibleFrame
+        var frame = panel.frame
+        frame.origin.x = visible.midX - frame.width / 2
+        frame.origin.y = visible.maxY - Self.screenPadding - frame.height
+        panel.setFrame(frame, display: true, animate: false)
+        Log.app.notice("面板位置: 重置默认 @\(Self.screenKey(for: screen), privacy: .public)")
+        refit()
+    }
+
     /// Size the panel to fit `chrome + result` content, grow and shrink, with
-    /// the **top edge pinned** — including at the screen's bottom edge, where
-    /// growth stops rather than sliding the window up. Results stream in by
-    /// extending the bottom edge downward while the input stays put;
-    /// collapsing/expanding a card likewise only moves the bottom, so the header
-    /// stays under the pointer. Past the ceiling the bodies scroll internally.
+    /// the **top edge pinned**: results stream downward while the input stays
+    /// put, and a user-dragged top edge is preserved — growth fills the room
+    /// below it, stops at the screen bottom, and past that the bodies scroll
+    /// instead of the panel sliding up.
     private func refit(display: Bool = true) {
         guard panel.isVisible, !panel.inLiveResize else { return }
-        guard let screen = panel.screen ?? NSScreen.main else { return }
+        // No geometry mutation during a window drag. While `.dragging`, even
+        // changing the cards' scroll budget makes the contents appear to slide;
+        // `.settling` holds everything until the one catch-up fit consumes the
+        // measurements cached during the gesture.
+        guard windowDragPhase == .idle else { return }
+        guard let screen = panelScreen else { return }
 
         let visible = screen.visibleFrame
-        // The ceiling is the room below the panel's current top edge, not the
-        // whole screen: the top stays exactly where it is and growth extends the
-        // bottom. Using the full screen height meant a panel that grew past the
-        // bottom margin got slid up to fit, so the top drifted while reading.
-        // Growth stops at the bottom margin instead and the bodies scroll.
-        // (There used to be a fixed 820pt ceiling on top of this. With a card
-        // height the user can drag and keep, a constant only got in the way.)
-        // Top stays pinned: growth ceiling is the room below the top edge, so the
-        // panel never slides up under the pointer. Content taller than this scrolls
-        // inside the result area (page reader / card bodies) rather than pushing
-        // the window off-screen — which requires the published budget below to be
-        // the *real* room, never floored above it.
-        let roomBelowTop = panel.frame.maxY - visible.minY - Self.screenPadding
         let ceiling = max(
             Self.minFittedHeight,
-            min(visible.height - Self.screenPadding * 2, roomBelowTop)
+            visible.height - Self.screenPadding * 2
+        )
+        // The fit may fill the room below the user's chosen top edge — never
+        // more, so fitting can't undo a drag (long content used to grow past
+        // the screen bottom and get shoved back up to fill the screen on
+        // release). This never runs mid-drag, so the old pathology — a toolbar
+        // below the visible frame turning negative room into a minimum-height
+        // strip — can't come back. The floors are need-driven: a panel parked
+        // at the very bottom lifts only by the shortfall that keeps
+        // `minFittedHeight` and an unclipped chrome, never a full-screen jump.
+        let resultFloor: CGFloat =
+            viewModel.run.runs.isEmpty || viewModel.ocrRecognizing ? 0 : Self.minVisibleResultStrip
+        let allowed = PanelLayout.allowedFitHeight(
+            roomBelowTop: panel.frame.maxY - visible.minY,
+            screenCeiling: ceiling,
+            minHeight: Self.minFittedHeight,
+            chrome: chromeHeightMeasured + Self.fitBuffer,
+            resultFloor: resultFloor
         )
 
         // Publish how much height is actually left for the result list at that
-        // ceiling given the current chrome. The page reader and the card bodies
-        // size their internal scroll viewport to this, so it must NOT exceed the
-        // room the window can show — a floor above the real room (the old
-        // `minResultBudget = 200`) pushed the viewport past the window's bottom
-        // edge, clipped and unreachable, whenever the panel sat low on screen.
-        let budget = max(0, ceiling - chromeHeightMeasured - Self.fitBuffer)
+        // allowance given the current chrome. The page reader and the card
+        // bodies size their internal scroll viewport to this, so it must NOT
+        // exceed the room the window can show — a floor above the real room
+        // (the old `minResultBudget = 200`) pushed the viewport past the
+        // window's bottom edge, clipped and unreachable.
+        let budget = max(0, allowed - chromeHeightMeasured - Self.fitBuffer)
         if abs(budget - viewModel.resultAreaBudget) > 1 {
             viewModel.resultAreaBudget = budget
         }
@@ -506,7 +683,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             result: resultHeightMeasured,
             buffer: Self.fitBuffer,
             floor: floor,
-            ceiling: ceiling
+            ceiling: allowed
         )
         guard abs(desired - panel.frame.height) > 4 else { return } // ignore jitter
 
@@ -515,16 +692,163 @@ final class PanelController: NSObject, NSWindowDelegate {
         frame.size.height = desired
         frame.origin.y = topY - desired
 
-        // Safety net only: the ceiling already keeps growth above the bottom
-        // margin, so this can fire just for a panel sitting lower than one
-        // minimum-height window (e.g. dragged to the very bottom edge).
-        if frame.minY < visible.minY + Self.screenPadding {
-            frame.origin.y = visible.minY + Self.screenPadding
-        }
-        if frame.maxY > visible.maxY - Self.screenPadding {
-            frame.origin.y = visible.maxY - Self.screenPadding - desired
-        }
+        // Safety net: `allowed` already stops growth at the screen bottom, so
+        // this fires only for the need-driven floors (panel parked at the very
+        // bottom), lifting by exactly that shortfall. The multi-screen rule
+        // keeps a straddling panel's x untouched instead of shoving it into
+        // one display.
+        frame.origin = WindowDragState.dragOrigin(
+            proposed: frame.origin,
+            windowSize: frame.size,
+            toolbarBandHeight: TranslatorPanel.toolbarBandHeight,
+            pointerScreen: visible,
+            screens: NSScreen.screens.map(\.visibleFrame)
+        )
         panel.setFrame(frame, display: display, animate: false)
+    }
+
+    /// Freeze only geometry/scroll offsets for the application-controlled drag;
+    /// TextKit keeps rendering the live stream inside those fixed viewports. On
+    /// release, consume all cached measurements in one catch-up fit.
+    private func beginWindowDrag() {
+        guard windowDragPhase != .dragging else { return }
+        // Supersede any settle turns still pending from the previous gesture:
+        // they must not unfreeze this one mid-hold.
+        windowDragGeneration += 1
+        captureScrollPositions()
+        viewModel.windowDragActive = true
+        windowDragPhase = .dragging
+        Log.app.notice("面板拖拽: begin frame=\(String(describing: self.panel.frame), privacy: .public)")
+
+        let poller = Timer(
+            timeInterval: 1.0 / 60.0,
+            target: self,
+            selector: #selector(pollWindowDragRelease),
+            userInfo: nil,
+            repeats: true
+        )
+        windowDragReleasePoller = poller
+        RunLoop.main.add(poller, forMode: .common)
+    }
+
+    @objc private func pollWindowDragRelease() {
+        if leftMouseGestureIsActive {
+            restoreScrollPositions()
+            return
+        }
+        finishWindowDrag()
+    }
+
+    private func finishWindowDrag() {
+        guard windowDragPhase == .dragging else { return }
+        restoreScrollPositions()
+        windowDragReleasePoller?.invalidate()
+        windowDragReleasePoller = nil
+        windowDragPhase = .settling
+        windowDragGeneration += 1
+        let generation = windowDragGeneration
+        // First release the card viewport lock. Streaming has remained visible
+        // throughout the drag, so every text view already contains the latest
+        // glyphs and its cached natural height is ready to apply. The
+        // generation guards drop this settle pass if a new grab supersedes it.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.windowDragGeneration == generation else { return }
+            self.viewModel.windowDragActive = false
+            self.panel.contentView?.layoutSubtreeIfNeeded()
+            self.restoreScrollPositions()
+
+            // Geometry preferences arrive after that SwiftUI pass. Hold every
+            // intermediate callback, then consume the latest values in one
+            // window-frame update on the following turn.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.windowDragGeneration == generation else { return }
+                self.panel.contentView?.layoutSubtreeIfNeeded()
+                self.windowDragPhase = .idle
+                self.refit()
+                self.restoreScrollPositions()
+                self.frozenScrollPositions.removeAll()
+                self.saveDraggedPanelPosition()
+                Log.app.notice("面板拖拽: end refitted frame=\(String(describing: self.panel.frame), privacy: .public)")
+            }
+        }
+    }
+
+    /// Drop all drag state without a settle pass — for close and re-present,
+    /// where the next `refit` should simply run under normal rules.
+    private func cancelWindowDrag() {
+        windowDragGeneration += 1
+        windowDragReleasePoller?.invalidate()
+        windowDragReleasePoller = nil
+        windowDragPhase = .idle
+        viewModel.windowDragActive = false
+        frozenScrollPositions.removeAll()
+    }
+
+    private func captureScrollPositions() {
+        frozenScrollPositions.removeAll()
+        guard let contentView = panel.contentView else { return }
+        for scrollView in scrollViews(in: contentView) {
+            frozenScrollPositions[ObjectIdentifier(scrollView)] = FrozenScrollPosition(
+                scrollView: scrollView
+            )
+        }
+    }
+
+    private func restoreScrollPositions() {
+        guard let contentView = panel.contentView else { return }
+        for scrollView in scrollViews(in: contentView) {
+            let identifier = ObjectIdentifier(scrollView)
+            let frozen: FrozenScrollPosition
+            if let existing = frozenScrollPositions[identifier] {
+                frozen = existing
+            } else {
+                // A streamed SwiftUI update may create a new scroll view during
+                // the gesture. Freeze it at the first position we observe.
+                let created = FrozenScrollPosition(scrollView: scrollView)
+                frozenScrollPositions[identifier] = created
+                frozen = created
+            }
+            let clipView = scrollView.contentView
+            guard abs(clipView.bounds.origin.x - frozen.origin.x) > 0.5
+                    || abs(clipView.bounds.origin.y - frozen.origin.y) > 0.5 else { continue }
+            clipView.scroll(to: frozen.origin)
+            scrollView.reflectScrolledClipView(clipView)
+        }
+    }
+
+    private func scrollViews(in root: NSView) -> [NSScrollView] {
+        var result: [NSScrollView] = []
+        if let scrollView = root as? NSScrollView {
+            result.append(scrollView)
+        }
+        for subview in root.subviews {
+            result.append(contentsOf: scrollViews(in: subview))
+        }
+        return result
+    }
+
+    /// WindowServer can report `buttonState == false` while it owns an AppKit
+    /// window drag. Event order remains stable: down is newer while held; up is
+    /// newer only after release.
+    private var leftMouseGestureIsActive: Bool {
+        let downAge = CGEventSource.secondsSinceLastEventType(
+            .combinedSessionState,
+            eventType: .leftMouseDown
+        )
+        let upAge = CGEventSource.secondsSinceLastEventType(
+            .combinedSessionState,
+            eventType: .leftMouseUp
+        )
+        return WindowDragState.isActive(downEventAge: downAge, upEventAge: upAge)
+    }
+
+    /// Prefer the screen containing the panel; a fully off-screen drop has no
+    /// such screen, so use the screen under the pointer before falling back to
+    /// the main display.
+    private var panelScreen: NSScreen? {
+        panel.screen
+            ?? NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
+            ?? NSScreen.main
     }
 
     // MARK: - Dismissal
@@ -555,8 +879,116 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     // MARK: - NSWindowDelegate
 
+    /// Catch every interactive window move at the NSWindow layer. The native
+    /// transparent title bar can start a move without hitting `WindowDragHandle`,
+    /// so observing only the SwiftUI/AppKit drag view misses the common path.
+    func windowWillMove(_ notification: Notification) {
+        guard notification.object as? NSWindow === panel,
+              leftMouseGestureIsActive else { return }
+        beginWindowDrag()
+    }
+
+    /// Usually the common-mode poller sees release first; this is a zero-delay
+    /// fallback for AppKit configurations that send a final did-move callback.
+    /// Even if `windowWillMove` was bypassed, a completed move still gets one
+    /// position-independent fit pass and cannot remain below the visible frame.
+    func windowDidMove(_ notification: Notification) {
+        guard notification.object as? NSWindow === panel else { return }
+        switch windowDragPhase {
+        case .dragging:
+            pollWindowDragRelease()
+        case .settling:
+            break // the catch-up fit is already scheduled
+        case .idle:
+            DispatchQueue.main.async { [weak self] in self?.refit() }
+        }
+    }
+
     func windowWillClose(_ notification: Notification) {
+        cancelWindowDrag()
         removeClickMonitor()
+    }
+}
+
+/// Pure event-order rule used by the WindowServer-owned drag. Comparing event
+/// ages is more dependable here than querying the instantaneous button bit.
+enum WindowDragState {
+    static func isActive(downEventAge: TimeInterval, upEventAge: TimeInterval) -> Bool {
+        downEventAge < upEventAge
+    }
+
+    /// Exact translation used by the custom drag. Intentionally unclamped: a
+    /// pointer delta of -900pt moves the panel -900pt, even across a screen edge.
+    static func windowOrigin(
+        startOrigin: NSPoint,
+        startPointer: NSPoint,
+        currentPointer: NSPoint
+    ) -> NSPoint {
+        NSPoint(
+            x: startOrigin.x + currentPointer.x - startPointer.x,
+            y: startOrigin.y + currentPointer.y - startPointer.y
+        )
+    }
+
+    /// Keep the whole panel inside the usable screen. When the pointer keeps
+    /// moving beyond an edge the panel simply stops there; it never slides under
+    /// the Dock/menu bar and never needs a later corrective jump.
+    static func constrainedOrigin(
+        proposed: NSPoint,
+        windowSize: NSSize,
+        visibleFrame: NSRect,
+        padding: CGFloat
+    ) -> NSPoint {
+        let minX = visibleFrame.minX + padding
+        let maxX = max(minX, visibleFrame.maxX - padding - windowSize.width)
+        let minY = visibleFrame.minY + padding
+        let maxY = max(minY, visibleFrame.maxY - padding - windowSize.height)
+        return NSPoint(
+            x: min(max(proposed.x, minX), maxX),
+            y: min(max(proposed.y, minY), maxY)
+        )
+    }
+
+    /// Constraint across the whole display arrangement. Vertically the window
+    /// stays fully inside the host screen (it never slides under the Dock or
+    /// menu bar). Horizontally it may span every screen whose usable frame also
+    /// contains its toolbar rows — wherever it can still be grabbed — so a
+    /// side-by-side crossing tracks the pointer smoothly instead of teleporting
+    /// into the new screen the moment the pointer crosses the seam.
+    static func dragOrigin(
+        proposed: NSPoint,
+        windowSize: NSSize,
+        toolbarBandHeight: CGFloat,
+        pointerScreen: NSRect,
+        screens: [NSRect]
+    ) -> NSPoint {
+        let minY = pointerScreen.minY
+        let maxY = max(minY, pointerScreen.maxY - windowSize.height)
+        let y = min(max(proposed.y, minY), maxY)
+
+        let bandMinY = y + windowSize.height - toolbarBandHeight
+        let bandMaxY = y + windowSize.height
+        var hosts = screens.filter { $0.minY <= bandMinY && $0.maxY >= bandMaxY }
+        if hosts.isEmpty { hosts = [pointerScreen] }
+        let minX = hosts.map(\.minX).min() ?? pointerScreen.minX
+        let maxX = max(minX, (hosts.map(\.maxX).max() ?? pointerScreen.maxX) - windowSize.width)
+        let x = min(max(proposed.x, minX), maxX)
+
+        // Non-adjacent arrangements can leave a void inside the union span.
+        // If the toolbar band would end up grabbable on no screen, fall back
+        // to plain containment in the host screen.
+        let band = NSRect(x: x, y: bandMinY, width: windowSize.width, height: bandMaxY - bandMinY)
+        let grabbable = hosts.contains { host in
+            let overlap = band.intersection(host)
+            return overlap.width >= 60 && overlap.height >= toolbarBandHeight - 1
+        }
+        guard grabbable else {
+            return constrainedOrigin(
+                proposed: proposed, windowSize: windowSize,
+                visibleFrame: pointerScreen, padding: 0
+            )
+        }
+        return NSPoint(x: x, y: y)
     }
 }
 
@@ -565,6 +997,26 @@ final class PanelController: NSObject, NSWindowDelegate {
 /// → many lines → overflow) without a running UI. No state, no actor isolation —
 /// just the formulas the views feed their live measurements into.
 enum PanelLayout {
+    /// A list grows with its card stack until the remaining result budget is
+    /// filled; overflow belongs to the list's own scroll view, never outside the
+    /// window. Zero budget legitimately produces a zero-height viewport.
+    static func scrollViewportHeight(content: CGFloat, budget: CGFloat) -> CGFloat {
+        min(max(0, content), max(0, budget))
+    }
+
+    /// Height ceiling for a fit at rest. The room below the panel's current top
+    /// edge preserves the user's placement; the floors are need-driven — the
+    /// overall minimum, and the chrome plus a minimum result strip (the input
+    /// must not be clipped, and existing cards must not be squeezed to zero,
+    /// by a panel parked at the screen bottom) — each lifting the panel by at
+    /// most its own shortfall. Never exceeds the screen's usable ceiling.
+    static func allowedFitHeight(
+        roomBelowTop: CGFloat, screenCeiling: CGFloat, minHeight: CGFloat,
+        chrome: CGFloat, resultFloor: CGFloat = 0
+    ) -> CGFloat {
+        Swift.min(screenCeiling, Swift.max(roomBelowTop, Swift.max(minHeight, chrome + resultFloor)))
+    }
+
     /// A result height is fit only when it belongs to the visible mode and no
     /// first measurement for that mode is outstanding.
     static func canUseResultMeasurement(

@@ -22,6 +22,9 @@ struct PageModeView: View {
     /// makes the selector's first geometry update report a ceiling-sized page
     /// when the user switches modes before the first translation chunk arrives.
     @State private var contentHeight: CGFloat?
+    /// Jump-to-latest affordance state, mirroring the result cards.
+    @State private var canJumpToBottom = false
+    @State private var jumpToken = 0
 
     private static let outputFloor: CGFloat = 80
 
@@ -37,6 +40,13 @@ struct PageModeView: View {
 
             outputBody
                 .frame(height: outputDisplayed)
+                .overlay(alignment: .bottomTrailing) {
+                    if canJumpToBottom, selectedIsStreaming {
+                        FollowStreamButton(identifier: "page.followStream") {
+                            jumpToken += 1
+                        }
+                    }
+                }
         }
         // An empty streaming run has no TextKit measurement yet, so publish the
         // compact loading height immediately. For an existing translation, keep
@@ -67,7 +77,10 @@ struct PageModeView: View {
                 original: run.lastSourceText ?? viewModel.inputText,
                 bilingual: viewModel.pageBilingual,
                 heightCeiling: outputCap,
-                onHeight: { contentHeight = $0 }
+                suppressFollow: viewModel.windowDragActive,
+                jumpToBottomToken: jumpToken,
+                onHeight: { contentHeight = $0 },
+                onScrollStateChange: { canJumpToBottom = $0 }
             )
         } else {
             Text("暂无结果")
@@ -75,6 +88,11 @@ struct PageModeView: View {
                 .foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
+    }
+
+    private var selectedIsStreaming: Bool {
+        if case .streaming? = selectedRun?.state { return true }
+        return false
     }
 
     /// Ceiling for the output area: the result-area budget minus the selector
@@ -145,7 +163,10 @@ private struct PageModeContent: View {
     let original: String
     let bilingual: Bool
     let heightCeiling: CGFloat
+    let suppressFollow: Bool
+    let jumpToBottomToken: Int
     var onHeight: (CGFloat) -> Void
+    var onScrollStateChange: (Bool) -> Void
 
     var body: some View {
         PageReaderView(
@@ -156,7 +177,10 @@ private struct PageModeContent: View {
             streamSettled: streamSettled,
             resetKey: engineRun.id,
             heightCeiling: heightCeiling,
-            onContentHeightChange: onHeight
+            suppressFollow: suppressFollow,
+            jumpToBottomToken: jumpToBottomToken,
+            onContentHeightChange: onHeight,
+            onScrollStateChange: onScrollStateChange
         )
     }
 

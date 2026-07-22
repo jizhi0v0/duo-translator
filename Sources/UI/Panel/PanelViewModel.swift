@@ -57,6 +57,10 @@ final class PanelViewModel: ObservableObject {
     /// their bodies to this so the total always fits the window (tall input →
     /// shorter, internally-scrolling cards) instead of overflowing off-screen.
     @Published var resultAreaBudget: CGFloat = 400
+    /// True only while the panel window itself is being dragged. Result cards
+    /// use it to hold their rendered body heights even if a queued TextKit
+    /// measurement arrives after streaming reveal has been paused.
+    @Published var windowDragActive = false
     /// Engine id whose performance popover is open (nil = none). Lifted out of
     /// the card's local state so a mode switch can dismiss it *before* the panel
     /// resizes: an open popover child window otherwise fights the page-mode

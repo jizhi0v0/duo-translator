@@ -104,6 +104,54 @@ final class PanelUITests: XCTestCase {
 
     // MARK: - Panel presentation
 
+    /// A remembered position (seeded through the app's own settings seam,
+    /// because dragging needs event posting the runner may not be allowed to
+    /// do) is where the panel opens — not the default top-center placement.
+    func testPanelOpensAtRememberedPosition() {
+        app?.terminate()
+        let pointer = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(pointer, $0.frame, false) }
+            ?? NSScreen.main
+        guard let visible = screen?.visibleFrame,
+              let primaryHeight = NSScreen.screens.first?.frame.height else {
+            XCTFail("no screen available"); return
+        }
+        let topLeft = CGPoint(
+            x: (visible.midX - 340).rounded(),
+            y: (visible.maxY - 200).rounded()
+        )
+
+        let a = XCUIApplication()
+        a.launchArguments += ["-uiTest"]
+        a.launchEnvironment["UITEST_INPUT"] = "记住位置"
+        a.launchEnvironment["UITEST_PANEL_TOPLEFT"] = "\(Int(topLeft.x)),\(Int(topLeft.y))"
+        a.launch()
+        app = a
+        XCTAssertTrue(a.buttons["input.copy"].waitForExistence(timeout: 10),
+                      "panel did not appear")
+
+        let frame = panel(a).frame
+        XCTAssertEqual(frame.minX, topLeft.x, accuracy: 2,
+                       "panel did not open at the remembered x")
+        // XCUI coordinates are top-left based: the Cocoa top edge converts via
+        // the primary screen height.
+        XCTAssertEqual(frame.minY, primaryHeight - topLeft.y, accuracy: 2,
+                       "panel top edge did not open at the remembered position")
+    }
+
+    /// Mid-stream, an overflowing body offers the jump-to-latest affordance;
+    /// reading stays top-anchored by default, so the button is the opt-in.
+    func testFollowStreamButtonAppearsForOverflowingStream() {
+        let text = String(
+            repeating: "长译文持续增长，超出卡片视口后应出现跳到最新内容的按钮。", count: 80
+        )
+        let app = launch(seed: "follow", results: 1, streaming: true, resultText: text)
+        XCTAssertTrue(
+            app.buttons["result.followStream"].waitForExistence(timeout: 10),
+            "the follow-stream button never appeared for an overflowing streaming body"
+        )
+    }
+
     func testPanelAppearsWithInputControls() {
         let app = launch(seed: "hello world")
         XCTAssertTrue(app.buttons["input.copy"].exists,
@@ -263,21 +311,24 @@ final class PanelUITests: XCTestCase {
         let copies = app.buttons.matching(identifier: "result.copy")
         XCTAssertEqual(copies.count, 3, "all result cards should render")
 
-        // Each result body is its own scroll view; with long text the body is
-        // capped and scrollable. Expect the three result bodies (plus the input).
+        // Each result body is its own scroll view and the provider stack has an
+        // outer fallback scroller for the case where card chrome alone is taller
+        // than the remaining result area.
         XCTAssertGreaterThanOrEqual(app.scrollViews.count, 3,
                                     "result bodies should be scroll views")
+        let list = app.scrollViews["results.listScroll"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5), "provider list scroll view is missing")
+        XCTAssertLessThanOrEqual(list.frame.maxY, panelFrame.maxY + 1,
+                                 "provider list viewport extends below the panel")
 
-        // Every card — including the last — must sit within the panel bounds and
-        // be reachable. Under the bug the bottom card's footer fell below the
-        // panel (maxY > panel.maxY) and was not hittable.
-        for i in 0..<copies.count {
-            let footer = copies.element(boundBy: i)
-            XCTAssertLessThanOrEqual(footer.frame.maxY, panelFrame.maxY + 1,
-                "result card \(i) footer clipped below the panel (footer.maxY=\(footer.frame.maxY), panel.maxY=\(panelFrame.maxY))")
-            XCTAssertTrue(footer.isHittable,
-                "result card \(i) footer is not reachable (clipped off-screen)")
+        // Scroll the outer list to the last provider. A clipped VStack failed
+        // this forever; a real scroll viewport makes the last footer hittable.
+        let lastFooter = copies.element(boundBy: copies.count - 1)
+        for _ in 0..<30 where !lastFooter.isHittable {
+            postScrollDown(in: list.frame)
+            usleep(20_000)
         }
+        XCTAssertTrue(lastFooter.isHittable, "last provider footer is not reachable by scrolling")
 
         // The panel itself stays within the screen (its only ceiling).
         XCTAssertLessThanOrEqual(panelFrame.height, Self.panelHeightCeiling,
@@ -303,11 +354,8 @@ final class PanelUITests: XCTestCase {
         )
     }
 
-    /// Scrolling while the text streams must not leave the cards hanging out of
-    /// the window. The window fit trails a growing card by a frame or two, which
-    /// is fine; what is not fine is that overflow persisting — the regression
-    /// this catches froze the layout for the whole gesture, so the cards sat
-    /// outside the panel until the user let go.
+    /// Scrolling while text streams must keep the outer list viewport inside the
+    /// window while still allowing the last provider to become reachable.
     ///
     /// The scroll is posted as real CGEvents. `XCUIElement.scroll` never reaches
     /// the app's `NSEvent` monitor, so a test written with it exercised none of
@@ -318,37 +366,63 @@ final class PanelUITests: XCTestCase {
         )
         let app = launch(seed: "scroll-grow", results: 2, streaming: true, resultText: text)
         let footers = app.buttons.matching(identifier: "result.copy")
-        let firstFooterYBefore = footers.firstMatch.frame.origin.y
+        let list = app.scrollViews["results.listScroll"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
 
         // The seeded stream starts at 3s; scroll without a pause across it.
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            postScrollUp(in: panel(app).frame)
+            postScrollDown(in: list.frame)
             usleep(16_000)
-            for i in 0..<footers.count {
-                let footer = footers.element(boundBy: i)
-                guard footer.frame.maxY > panel(app).frame.maxY + 1 else { continue }
-                // Outside the window: the fit is allowed to be a frame behind,
-                // so give it a moment to catch up before calling it a failure.
-                XCTAssertTrue(
-                    waitUntil(timeout: 0.5) {
-                        footer.frame.maxY <= self.panel(app).frame.maxY + 1
-                    },
-                    "card \(i) stayed outside the window while scrolling"
-                )
-            }
+            XCTAssertLessThanOrEqual(list.frame.maxY, panel(app).frame.maxY + 1,
+                                     "result-list viewport escaped the panel")
         }
 
-        XCTAssertTrue(
-            waitUntil(timeout: 6) { footers.firstMatch.frame.origin.y > firstFooterYBefore + 20 },
-            "cards never grew with the stream (footer y \(firstFooterYBefore) -> \(footers.firstMatch.frame.origin.y))"
+        let lastFooter = footers.element(boundBy: footers.count - 1)
+        XCTAssertTrue(waitUntil(timeout: 3) { lastFooter.isHittable },
+                      "last provider did not become reachable while scrolling")
+    }
+
+    /// Height stays frozen only while the mouse is held. On release normal
+    /// content fitting resumes, so short results never inherit a stale viewport.
+    func testDraggingWindowToScreenEdgeFreezesOnlyTheHeldGesture() {
+        let text = String(
+            repeating: "流式翻译过程中持续拖动窗口，结果区域仍应保持可见并可以滚动。", count: 40
         )
+        let app = launch(seed: "drag while streaming", results: 1, streaming: true, resultText: text)
+        let initialFrame = panel(app).frame
+
+        // Press in the toolbar's empty center, move it to the physical bottom,
+        // and keep the button held across the seeded stream (starts at 3s). A
+        // small horizontal wobble keeps generating real drag events.
+        let start = CGPoint(x: initialFrame.midX, y: initialFrame.minY + 16)
+        let screenBottom = (NSScreen.main?.frame.height ?? initialFrame.maxY + 600) - 2
+        let end = CGPoint(x: start.x, y: screenBottom)
+        post(.leftMouseDown, at: start)
+        let steps = 240
+        for i in 1...steps {
+            let progress = min(1, CGFloat(i) / 80)
+            let point = CGPoint(
+                x: start.x + (i.isMultiple(of: 2) ? 1 : -1),
+                y: start.y + (end.y - start.y) * progress
+            )
+            post(.leftMouseDragged, at: point)
+            usleep(10_000)
+        }
+        let heldFrame = panel(app).frame
+        XCTAssertEqual(
+            heldFrame.height, initialFrame.height, accuracy: 5,
+            "streaming resized the panel while the mouse was still held"
+        )
+        post(.leftMouseUp, at: end)
+
+        XCTAssertTrue(waitUntil(timeout: 5) { app.scrollViews.count >= 1 })
+        XCTAssertGreaterThanOrEqual(app.scrollViews.count, 1, "the long result should remain scrollable")
     }
 
     /// The panel's top edge never moves on its own. Long results extend the
-    /// bottom; when that reaches the screen's bottom margin the panel stops
-    /// growing (bodies scroll instead) rather than sliding up, which used to
-    /// drag the whole window — and the text being read — upward mid-stream.
+    /// bottom; from the normal high opening position it reaches the screen
+    /// ceiling without moving the top, then the bodies scroll internally.
     func testPanelTopStaysPutWhileResultsGrow() {
         let app = launch(seed: "top pinned")
         let topBefore = panel(app).frame.origin.y
@@ -456,6 +530,16 @@ final class PanelUITests: XCTestCase {
         guard let event = CGEvent(
             scrollWheelEvent2Source: nil, units: .pixel,
             wheelCount: 1, wheel1: 12, wheel2: 0, wheel3: 0
+        ) else { return }
+        event.location = CGPoint(x: frame.midX, y: frame.midY)
+        event.post(tap: .cghidEventTap)
+    }
+
+    /// One scroll-down tick over the middle of `frame`, as a real HID event.
+    private func postScrollDown(in frame: CGRect) {
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: nil, units: .pixel,
+            wheelCount: 1, wheel1: -24, wheel2: 0, wheel3: 0
         ) else { return }
         event.location = CGPoint(x: frame.midX, y: frame.midY)
         event.post(tap: .cghidEventTap)

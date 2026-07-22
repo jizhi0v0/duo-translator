@@ -1,14 +1,15 @@
 import SwiftUI
 
-/// Vertically stacked result cards, one per enabled engine. The stack is
-/// intrinsically sized so its measured height is reliable and the window fits it
-/// exactly. Each card's body follows its streamed text up to its share of the
-/// window (`perCardMaxBody`), then scrolls internally (its own NSScrollView)
-/// rather than pushing later cards out of the panel.
+/// Vertically stacked result cards, one per enabled engine. Each card body
+/// scrolls independently; the whole list also becomes scrollable when the cards'
+/// headers, footers and minimum body viewports cannot fit in the remaining panel
+/// height. Without that second layer the last provider was clipped below the
+/// window and could never be reached.
 struct ResultListView: View {
     @ObservedObject var viewModel: PanelViewModel
     @ObservedObject var run: TranslationRunController
     var onResultsHeightChange: (CGFloat) -> Void
+    @State private var measuredCardStackHeight: CGFloat = 0
 
     var body: some View {
         content
@@ -34,26 +35,45 @@ struct ResultListView: View {
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.vertical, 16)
         } else {
-            VStack(spacing: 8) {
-                ForEach(run.runs) { engineRun in
-                    ResultCardView(
-                        engineRun: engineRun,
-                        isCollapsed: viewModel.collapsedBinding(for: engineRun.id),
-                        metricsPresented: viewModel.metricsPopoverBinding(for: engineRun.id),
-                        targetLanguage: run.targetLanguage,
-                        maxBodyHeight: perCardMaxBody,
-                        onRetry: { run.retry(runID: engineRun.id) },
-                        onDownloadApple: { source, target in
-                            run.downloadAppleLanguagePack(
-                                runID: engineRun.id, source: source, target: target
-                            )
-                        }
-                    )
+            ScrollView(.vertical) {
+                VStack(spacing: Self.cardSpacing) {
+                    ForEach(run.runs) { engineRun in
+                        ResultCardView(
+                            engineRun: engineRun,
+                            isCollapsed: viewModel.collapsedBinding(for: engineRun.id),
+                            metricsPresented: viewModel.metricsPopoverBinding(for: engineRun.id),
+                            targetLanguage: run.targetLanguage,
+                            maxBodyHeight: perCardMaxBody,
+                            layoutFrozen: viewModel.windowDragActive,
+                            onRetry: { run.retry(runID: engineRun.id) },
+                            onDownloadApple: { source, target in
+                                run.downloadAppleLanguagePack(
+                                    runID: engineRun.id, source: source, target: target
+                                )
+                            }
+                        )
+                    }
+                }
+                .padding(.horizontal, Self.listHorizontalPadding)
+                .padding(.vertical, Self.listVerticalPadding)
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) {
+                    measuredCardStackHeight = $0
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .frame(height: listViewportHeight)
+            .scrollIndicators(.automatic)
+            .accessibilityIdentifier("results.listScroll")
         }
+    }
+
+    /// Natural height until the stack reaches the panel's live result budget;
+    /// after that this is a fixed outer viewport and the provider list scrolls.
+    private var listViewportHeight: CGFloat {
+        let estimated = Self.minimumEstimatedStackHeight(cardCount: run.runs.count)
+        return PanelLayout.scrollViewportHeight(
+            content: measuredCardStackHeight > 1 ? measuredCardStackHeight : estimated,
+            budget: viewModel.resultAreaBudget
+        )
     }
 
     /// Per-card body ceiling, shrinking as more providers share the window so
@@ -66,7 +86,9 @@ struct ResultListView: View {
         // fits — never pushing the bottom card off-screen with no scrollbar.
         PanelLayout.perCardBodyMax(
             count: run.runs.count,
-            budget: viewModel.resultAreaBudget - 20,
+            budget: viewModel.resultAreaBudget
+                - Self.listVerticalPadding * 2
+                - Self.cardSpacing * CGFloat(max(0, run.runs.count - 1)),
             cardChrome: Self.cardChrome,
             floor: 96
         )
@@ -74,4 +96,15 @@ struct ResultListView: View {
 
     /// Header + divider/grab band + footer around each card's body.
     private static let cardChrome: CGFloat = 90
+    private static let cardSpacing: CGFloat = 8
+    private static let listHorizontalPadding: CGFloat = 12
+    private static let listVerticalPadding: CGFloat = 10
+    private static let minimumBodyEstimate: CGFloat = 40
+
+    private static func minimumEstimatedStackHeight(cardCount: Int) -> CGFloat {
+        let count = max(0, cardCount)
+        return listVerticalPadding * 2
+            + CGFloat(count) * (cardChrome + minimumBodyEstimate)
+            + CGFloat(max(0, count - 1)) * cardSpacing
+    }
 }
