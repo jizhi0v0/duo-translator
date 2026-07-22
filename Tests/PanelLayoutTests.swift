@@ -10,32 +10,64 @@ final class PanelLayoutTests: XCTestCase {
     // MARK: - Metrics tips placement
 
     func testMetricsTipsUsesBelowWhenThereIsRoom() {
-        let origin = MetricsOverlayPlacement.origin(
+        let placement = MetricsOverlayPlacement.fit(
             gauge: CGRect(x: 100, y: 50, width: 16, height: 16),
-            popoverSize: CGSize(width: 240, height: 220),
+            naturalSize: CGSize(width: 240, height: 220),
             containerSize: CGSize(width: 480, height: 600)
         )
-        XCTAssertEqual(origin.y, 72)
+        XCTAssertEqual(placement.origin.y, 72)
+        XCTAssertEqual(placement.size.height, 220, "full room: renders at its natural height")
     }
 
     func testMetricsTipsFlipsAboveNearPanelBottom() {
         let gauge = CGRect(x: 100, y: 500, width: 16, height: 16)
-        let origin = MetricsOverlayPlacement.origin(
+        let placement = MetricsOverlayPlacement.fit(
             gauge: gauge,
-            popoverSize: CGSize(width: 240, height: 220),
+            naturalSize: CGSize(width: 240, height: 220),
             containerSize: CGSize(width: 480, height: 600)
         )
-        XCTAssertEqual(origin.y, gauge.minY - 6 - 220)
-        XCTAssertGreaterThanOrEqual(origin.y, 8)
+        XCTAssertEqual(placement.origin.y, gauge.minY - 6 - 220)
+        XCTAssertGreaterThanOrEqual(placement.origin.y, 8)
+        XCTAssertEqual(placement.size.height, 220, "full room on the flipped side too")
     }
 
     func testMetricsTipsClampsHorizontallyInsidePanel() {
-        let origin = MetricsOverlayPlacement.origin(
+        let placement = MetricsOverlayPlacement.fit(
             gauge: CGRect(x: 470, y: 50, width: 10, height: 10),
-            popoverSize: CGSize(width: 240, height: 220),
+            naturalSize: CGSize(width: 240, height: 220),
             containerSize: CGSize(width: 480, height: 600)
         )
-        XCTAssertEqual(origin.x, 232)
+        XCTAssertEqual(placement.origin.x, 232)
+    }
+
+    /// On a short panel where the card fits neither above nor below the gauge
+    /// at full height, flipping above unclamped (the old rule) would land it
+    /// on top of the toolbar's own buttons — `topInset` marks that region
+    /// off-limits, so the card shrinks (its own scroll view gives up rows)
+    /// to whatever room the chosen side actually has instead.
+    func testMetricsTipsNeverCoversProtectedChrome() {
+        let gauge = CGRect(x: 100, y: 240, width: 16, height: 16)
+        let naturalSize = CGSize(width: 240, height: 220)
+        let containerSize = CGSize(width: 480, height: 300)
+        let topInset: CGFloat = 60
+
+        // Without the inset, this exact geometry flips above the gauge at
+        // its full natural height.
+        let unprotected = MetricsOverlayPlacement.fit(
+            gauge: gauge, naturalSize: naturalSize, containerSize: containerSize
+        )
+        XCTAssertEqual(unprotected.origin.y, gauge.minY - 6 - naturalSize.height)
+        XCTAssertEqual(unprotected.size.height, naturalSize.height)
+
+        let protected = MetricsOverlayPlacement.fit(
+            gauge: gauge, naturalSize: naturalSize, containerSize: containerSize, topInset: topInset
+        )
+        XCTAssertGreaterThanOrEqual(protected.origin.y, 8 + topInset)
+        XCTAssertLessThan(protected.size.height, naturalSize.height, "shrinks rather than spilling into the chrome")
+        XCTAssertLessThanOrEqual(
+            protected.origin.y + protected.size.height, containerSize.height - 8,
+            "shrinks rather than spilling past the window edge too"
+        )
     }
 
     // MARK: - Result-list scroll viewport

@@ -479,6 +479,11 @@ final class PanelController: NSObject, NSWindowDelegate {
         // Closing the panel ends the OCR session too: drop the image attachment.
         viewModel.ocr = nil
         viewModel.ocrRecognizing = false
+        // The metrics popover is keyed by engine profile id, not by run — left
+        // open, it would silently reattach itself the moment a future run for
+        // the same engine finishes, popping up unasked and, on a short panel,
+        // over the toolbar above it.
+        viewModel.metricsRunID = nil
         removeClickMonitor()
         panel.orderOut(nil)
     }

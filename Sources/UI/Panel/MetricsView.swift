@@ -48,37 +48,44 @@ struct MetricsPopover: View {
 
             Divider()
 
-            VStack(spacing: 7) {
-                DetailRow(label: "总耗时", value: metrics.totalDisplay.value + " " + metrics.totalDisplay.unit)
-                if let flow = metrics.tokenFlow {
-                    DetailRow(label: "Token", value: flow)
-                }
-                if let total = metrics.totalTokens {
-                    DetailRow(label: "合计 Token", value: "\(total)")
-                }
-                if metrics.completionTokens == nil {
-                    DetailRow(label: "输出", value: "\(metrics.outputChars) 字")
-                }
-                if let cost = metrics.costDisplay {
-                    DetailRow(label: "成本", value: cost)
-                }
-                // The rest only appear when they have something to say: a
-                // reasoning model, a cache hit, a stall, a re-route. On an
-                // ordinary run the card stays as short as it was.
-                if let reasoning = metrics.reasoningDisplay {
-                    DetailRow(label: "思考 Token", value: reasoning)
-                }
-                if let cache = metrics.cacheDisplay {
-                    DetailRow(label: "缓存命中", value: cache)
-                }
-                if let network = metrics.networkDisplay {
-                    DetailRow(label: "连接", value: network)
-                }
-                if let stall = metrics.stallDisplay {
-                    DetailRow(label: "流式", value: stall)
-                }
-                if let routed = metrics.routedModelDisplay(requested: requestedModel) {
-                    DetailRow(label: "实际模型", value: routed)
+            // Scrollable, not a plain VStack: on a short panel the overlay
+            // layout (`MetricsOverlayPlacement`) may hand this card less
+            // height than its full detail list needs. The header and stat
+            // tiles above stay fully visible either way; only this list
+            // trades away rows to a scrollbar instead of the card spilling
+            // past the space it was given.
+            ScrollView {
+                VStack(spacing: 7) {
+                    DetailRow(label: "总耗时", value: metrics.totalDisplay.value + " " + metrics.totalDisplay.unit)
+                    // One row for token usage: "输入 → 输出（共 合计）" reads as a
+                    // single flow instead of two separately-labelled numbers.
+                    if let flow = metrics.tokenFlow {
+                        let value = metrics.totalTokens.map { "\(flow)（共 \($0)）" } ?? flow
+                        DetailRow(label: "Token", value: value)
+                    } else {
+                        DetailRow(label: "输出", value: "\(metrics.outputChars) 字")
+                    }
+                    if let cost = metrics.costDisplay {
+                        DetailRow(label: "成本", value: cost)
+                    }
+                    // The rest only appear when they have something to say: a
+                    // reasoning model, a cache hit, a stall, a re-route. On an
+                    // ordinary run the card stays as short as it was.
+                    if let reasoning = metrics.reasoningDisplay {
+                        DetailRow(label: "思考 Token", value: reasoning)
+                    }
+                    if let cache = metrics.cacheDisplay {
+                        DetailRow(label: "缓存命中", value: cache)
+                    }
+                    if let network = metrics.networkDisplay {
+                        DetailRow(label: "首字节", value: network)
+                    }
+                    if let stall = metrics.stallDisplay {
+                        DetailRow(label: "最长停顿", value: stall)
+                    }
+                    if let routed = metrics.routedModelDisplay(requested: requestedModel) {
+                        DetailRow(label: "实际模型", value: routed)
+                    }
                 }
             }
         }

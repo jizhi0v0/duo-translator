@@ -159,9 +159,9 @@ struct RunMetrics: Equatable, Sendable {
         return "\(reasoning)（占输出 \(share)%）"
     }
 
-    /// Where the time before the first token went. The headline is the
-    /// self-measured time to headers, which is always available; the handshake /
-    /// server split is appended when URLSession's metrics arrived in time.
+    /// Time to first byte, the headline number the "首字节" row shows. The
+    /// handshake / server split is appended when URLSession's metrics arrived
+    /// in time. Doesn't repeat "首字节" itself — that's the row's label.
     var networkDisplay: String? {
         guard let network else { return nil }
         var detail: [String] = []
@@ -173,14 +173,16 @@ struct RunMetrics: Equatable, Sendable {
         if let serverWait = network.serverWait {
             detail.append("服务端 \(Self.milliseconds(serverWait))")
         }
-        let headline = "首字节 \(Self.milliseconds(network.toFirstByte))"
+        let headline = Self.milliseconds(network.toFirstByte)
         return detail.isEmpty ? headline : headline + "（" + detail.joined(separator: " · ") + "）"
     }
 
-    /// A stall worth naming. Under ~0.5s the gaps are ordinary token jitter.
+    /// Longest gap between two streamed chunks, as a plain duration — the
+    /// "最长停顿" row supplies the label. Under ~0.5s the gaps are ordinary
+    /// token jitter and the row doesn't appear at all.
     var stallDisplay: String? {
         guard let gap = longestChunkGap, gap >= 0.5 else { return nil }
-        return "最长停顿 \(Self.seconds(gap, decimals: 1))"
+        return Self.seconds(gap, decimals: 1)
     }
 
     /// The model the provider says it ran — surfaced only when it differs from

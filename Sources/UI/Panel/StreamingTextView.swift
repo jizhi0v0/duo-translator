@@ -227,9 +227,16 @@ struct StreamingTextView: NSViewRepresentable {
             reportScrollState()
         }
 
-        /// (overflowing, atBottom) for the current viewport.
+        /// (overflowing, atBottom) for the current viewport. Before any text has
+        /// landed there is nothing to jump to — reported unconditionally, since
+        /// an empty document's frame is still settling and can otherwise briefly
+        /// disagree with the clip view's freshly-reset height (a stale-tall
+        /// frame from the previous run, or an AppKit layout not yet caught up),
+        /// which read as "overflowing" and popped the jump button over an empty
+        /// "翻译中…" placeholder.
         private func viewportState() -> (overflowing: Bool, atBottom: Bool) {
-            guard let textView, let clip = textView.enclosingScrollView?.contentView else {
+            guard let textView, let clip = textView.enclosingScrollView?.contentView,
+                  let storage = textView.textStorage, storage.length > 0 else {
                 return (false, true)
             }
             let docHeight = textView.frame.height
@@ -540,8 +547,11 @@ struct PageReaderView: NSViewRepresentable {
             reportScrollState()
         }
 
+        /// (overflowing, atBottom) for the current viewport. See the card
+        /// coordinator's twin for why an empty document always short-circuits.
         private func viewportState() -> (overflowing: Bool, atBottom: Bool) {
-            guard let textView, let clip = textView.enclosingScrollView?.contentView else {
+            guard let textView, let clip = textView.enclosingScrollView?.contentView,
+                  let storage = textView.textStorage, storage.length > 0 else {
                 return (false, true)
             }
             let docHeight = textView.frame.height

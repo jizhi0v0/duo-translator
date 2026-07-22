@@ -18,6 +18,12 @@ struct PanelRootView: View {
     var onModeChange: (Bool) -> Void
     var onClose: () -> Void
 
+    /// Height of the toolbar/input/language-bar chrome above the results,
+    /// measured alongside `onChromeHeightChange`. Fed to the metrics overlay so
+    /// it can never place itself over the toolbar's buttons, even when flipped
+    /// above a gauge near the top of a short panel.
+    @State private var chromeHeight: CGFloat = 0
+
     var body: some View {
         mainColumn
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -106,6 +112,7 @@ struct PanelRootView: View {
             // an oscillation that left a variable gap under the language bar.
             .fixedSize(horizontal: false, vertical: true)
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) {
+                chromeHeight = $0
                 onChromeHeightChange($0)
             }
 
@@ -133,8 +140,10 @@ struct PanelRootView: View {
     }
 
     /// The floating metrics card. Its custom layout measures the real popover
-    /// first, then places it below the gauge when possible or flips it above;
-    /// unlike a visual offset, placement participates in layout and hit testing.
+    /// first, then places it below the gauge when possible, flips it above, or
+    /// — on a panel too short for either — shrinks it to whatever room is left
+    /// (see `MetricsOverlayPlacement.fit`); unlike a visual offset, placement
+    /// participates in layout and hit testing.
     @ViewBuilder
     private func metricsOverlay(_ anchor: Anchor<CGRect>?) -> some View {
         if let anchor,
@@ -143,7 +152,7 @@ struct PanelRootView: View {
            let metrics = engineRun.metrics {
             GeometryReader { proxy in
                 let gauge = proxy[anchor]
-                MetricsOverlayLayout(gauge: gauge) {
+                MetricsOverlayLayout(gauge: gauge, topInset: chromeHeight) {
                     // Tap anywhere off the card to dismiss.
                     Color.clear
                         .contentShape(Rectangle())
@@ -162,42 +171,61 @@ struct PanelRootView: View {
 
 /// Pure placement rule shared by the custom layout and unit tests.
 enum MetricsOverlayPlacement {
-    static func origin(
+    /// Where the card goes, and how tall it's allowed to render — capped to
+    /// whatever room the chosen side actually has, so the card is never asked
+    /// to overlap the trigger, the protected chrome, or the window edge. The
+    /// card's own scroll view (see `MetricsPopover`) does the rest: content
+    /// beyond `size.height` scrolls instead of spilling out.
+    ///
+    /// - Parameter topInset: height of the fixed chrome (toolbar / input /
+    ///   language bar) above the results, out of bounds for the card even when
+    ///   it flips above the gauge — that chrome holds the panel's own buttons
+    ///   (pin, page mode, language pickers), which must stay clickable.
+    static func fit(
         gauge: CGRect,
-        popoverSize: CGSize,
+        naturalSize: CGSize,
         containerSize: CGSize,
         margin: CGFloat = 8,
-        gap: CGFloat = 6
-    ) -> CGPoint {
-        let maxX = max(margin, containerSize.width - margin - popoverSize.width)
+        gap: CGFloat = 6,
+        topInset: CGFloat = 0
+    ) -> (origin: CGPoint, size: CGSize) {
+        let maxX = max(margin, containerSize.width - margin - naturalSize.width)
         let x = min(max(gauge.minX, margin), maxX)
 
-        let below = gauge.maxY + gap
-        let above = gauge.minY - gap - popoverSize.height
-        let fitsBelow = below + popoverSize.height <= containerSize.height - margin
-        let fitsAbove = above >= margin
-        let preferredY: CGFloat
-        if fitsBelow {
-            preferredY = below
-        } else if fitsAbove {
-            preferredY = above
+        let topBound = margin + topInset
+        let bottomBound = containerSize.height - margin
+        let roomBelow = bottomBound - (gauge.maxY + gap)
+        let roomAbove = (gauge.minY - gap) - topBound
+
+        // Prefer below when it holds the card at full height. Flip above only
+        // if below can't but above can. If neither can, pick whichever side
+        // has more room and let the card's own scroll view give up the rest —
+        // it must shrink to fit there, not spill into the trigger row, the
+        // chrome above, or past the window edge below.
+        let useBelow: Bool
+        if roomBelow >= naturalSize.height {
+            useBelow = true
+        } else if roomAbove >= naturalSize.height {
+            useBelow = false
         } else {
-            // Neither side fully fits (very short panel): choose the side with
-            // more room, then clamp as much of the card onscreen as possible.
-            let roomBelow = containerSize.height - margin - below
-            let roomAbove = gauge.minY - gap - margin
-            preferredY = roomAbove > roomBelow ? above : below
+            useBelow = roomBelow >= roomAbove
         }
-        let maxY = max(margin, containerSize.height - margin - popoverSize.height)
-        let y = min(max(preferredY, margin), maxY)
-        return CGPoint(x: x, y: y)
+
+        let room = useBelow ? roomBelow : roomAbove
+        let height = min(naturalSize.height, max(1, room))
+        let y = useBelow ? (gauge.maxY + gap) : (gauge.minY - gap - height)
+        let clampedY = min(max(y, topBound), max(topBound, bottomBound - height))
+
+        return (CGPoint(x: x, y: clampedY), CGSize(width: naturalSize.width, height: height))
     }
 }
 
-/// Measures the metrics card before positioning it. Child 0 is the full-panel
-/// dismiss catcher; child 1 is the intrinsic-size popover drawn above it.
+/// Measures the metrics card before positioning it, then proposes it whatever
+/// height `fit` decided it gets. Child 0 is the full-panel dismiss catcher;
+/// child 1 is the popover drawn above it.
 private struct MetricsOverlayLayout: Layout {
     let gauge: CGRect
+    let topInset: CGFloat
 
     func sizeThatFits(
         proposal: ProposedViewSize,
@@ -220,18 +248,22 @@ private struct MetricsOverlayLayout: Layout {
             proposal: ProposedViewSize(width: bounds.width, height: bounds.height)
         )
 
-        let popoverSize = subviews[1].sizeThatFits(
+        // Unconstrained height first, to learn how tall the card would like to
+        // be; `fit` then caps that against the actual room and the card's own
+        // scroll view (see `MetricsPopover`) absorbs the difference.
+        let naturalSize = subviews[1].sizeThatFits(
             ProposedViewSize(width: 240, height: nil)
         )
-        let local = MetricsOverlayPlacement.origin(
+        let placement = MetricsOverlayPlacement.fit(
             gauge: gauge,
-            popoverSize: popoverSize,
-            containerSize: bounds.size
+            naturalSize: naturalSize,
+            containerSize: bounds.size,
+            topInset: topInset
         )
         subviews[1].place(
-            at: CGPoint(x: bounds.minX + local.x, y: bounds.minY + local.y),
+            at: CGPoint(x: bounds.minX + placement.origin.x, y: bounds.minY + placement.origin.y),
             anchor: .topLeading,
-            proposal: ProposedViewSize(popoverSize)
+            proposal: ProposedViewSize(placement.size)
         )
     }
 }

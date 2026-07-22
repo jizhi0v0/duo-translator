@@ -140,7 +140,7 @@ final class RunMetricsTests: XCTestCase {
             total: 5, ttft: 0.5, outputChars: 100, chunkGaps: [0.02, 1.8, 0.05]
         )
         XCTAssertEqual(stalled.longestChunkGap, 1.8)
-        XCTAssertEqual(stalled.stallDisplay, "最长停顿 1.8s")
+        XCTAssertEqual(stalled.stallDisplay, "1.8s")
     }
 
     /// The point of capturing the model is catching a gateway that silently
@@ -162,7 +162,7 @@ final class RunMetricsTests: XCTestCase {
             total: 1, ttft: 0.4, outputChars: 5,
             network: NetworkTiming(toFirstByte: 0.32)
         )
-        XCTAssertEqual(bare.networkDisplay, "首字节 320ms")
+        XCTAssertEqual(bare.networkDisplay, "320ms")
     }
 
     func testNetworkDisplayAddsTheSplitWhenMetricsArrived() {
@@ -172,7 +172,7 @@ final class RunMetricsTests: XCTestCase {
                 toFirstByte: 0.32, connect: 0.12, serverWait: 0.19, reusedConnection: false
             )
         )
-        XCTAssertEqual(fresh.networkDisplay, "首字节 320ms（握手 120ms · 服务端 190ms）")
+        XCTAssertEqual(fresh.networkDisplay, "320ms（握手 120ms · 服务端 190ms）")
 
         let reused = RunMetrics.make(
             total: 1, ttft: 0.4, outputChars: 5,
@@ -180,6 +180,6 @@ final class RunMetricsTests: XCTestCase {
                 toFirstByte: 0.21, connect: nil, serverWait: 0.2, reusedConnection: true
             )
         )
-        XCTAssertEqual(reused.networkDisplay, "首字节 210ms（复用连接 · 服务端 200ms）")
+        XCTAssertEqual(reused.networkDisplay, "210ms（复用连接 · 服务端 200ms）")
     }
 }
