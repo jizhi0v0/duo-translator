@@ -58,7 +58,10 @@ final class ImagePreviewController: NSObject {
         let scrim = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
         scrim.isOpaque = false
         scrim.backgroundColor = NSColor.black.withAlphaComponent(0.45)
-        scrim.level = .floating
+        // Same level as the panel, ordered front after it — which is what puts
+        // the scrim over the panel. Derived from `TranslatorPanel.level` rather
+        // than written out, so raising the panel cannot bury its own lightbox.
+        scrim.level = TranslatorPanel.level
         scrim.ignoresMouseEvents = false
         scrim.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         scrim.hasShadow = false
@@ -81,8 +84,8 @@ final class ImagePreviewController: NSObject {
         win.isOpaque = false
         win.backgroundColor = .clear
         win.hasShadow = true
-        // Above the scrim (which is `.floating`) so the image stays on top.
-        win.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+        // One above the scrim so the image stays on top of it.
+        win.level = NSWindow.Level(rawValue: TranslatorPanel.level.rawValue + 1)
         win.onDismiss = { [weak self] in self?.dismiss() }
 
         let imageView = ClickImageView()

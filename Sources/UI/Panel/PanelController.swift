@@ -3,6 +3,23 @@ import Combine
 import SwiftUI
 
 final class TranslatorPanel: NSPanel {
+    /// Where the panel sits in the window stack, and the one number the
+    /// lightbox's own levels are derived from (see `ImagePreviewController`).
+    ///
+    /// `.floating` (3) was not enough. Apps that show a picture "full screen"
+    /// without taking a Space put that viewer at `.popUpMenu` (101) — measured
+    /// 2026-08-11 on Telegram's image viewer, a 1728x1117 window at layer 101
+    /// covering the menu bar. A translation panel at 3 lands underneath it, so
+    /// the whole point of the screenshot-OCR flow (translate what is on screen
+    /// *right now*) fails on exactly the content you most want translated.
+    ///
+    /// One above 101, not higher. The cost is that other apps' context menus
+    /// (also 101) now open *below* the panel; `.screenSaver` would additionally
+    /// clear things we have no business covering. Our own menus are unaffected:
+    /// AppKit levels a menu at `max(101, parentWindow + 1)`, so a menu from this
+    /// panel comes back at 103 — measured, not assumed.
+    static let level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
+
     static let screenPadding: CGFloat = 24
     /// Approximate height of the toolbar rows at the top of the panel — the
     /// window's grab region. Cross-screen dragging keeps this band reachable.
@@ -238,8 +255,11 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.standardWindowButton(.closeButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
+        // ORDER MATTERS: `isFloatingPanel = true` resets the window level to
+        // `.floating`, so it has to come first or the assignment below is
+        // silently undone.
         panel.isFloatingPanel = true
-        panel.level = .floating
+        panel.level = TranslatorPanel.level
         // Become key on any click (not only when a subview needs the keyboard):
         // otherwise the non-activating panel spends the first click just becoming
         // key, so toolbar buttons need a wasted second click to register.
