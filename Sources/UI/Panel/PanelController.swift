@@ -716,20 +716,21 @@ final class PanelController: NSObject, NSWindowDelegate {
             chrome: chromeHeightMeasured + Self.fitBuffer,
             resultFloor: resultFloor
         )
-        // While streaming, growth fills only the room below the top edge —
-        // reaching the screen bottom turns into internal scrolling, never a
-        // window that chases the stream upward. Once every engine settles, one
-        // closing fit may lift the top edge by the remaining shortfall
-        // (bottom-anchored, via the dragOrigin safety net below): a panel
-        // parked low opens to the content's full height instead of leaving the
-        // reader a manual drag away from seeing it.
+        // Growth fills only the room below the top edge, in every phase and
+        // both modes: reaching the screen bottom turns into internal
+        // scrolling, never a window that lifts itself out of the placement it
+        // was given. The fit ceiling used to open to the whole usable screen
+        // once every engine settled, so a finished run moved the panel out
+        // from under the reader (measured, parked low: height 753 → 841 with
+        // the top edge 288 → 276 at settle) — and in page mode it fired on
+        // every fit, since an article has no natural end for the fit to open
+        // to (measured: y 276 → 82 the moment page mode came on, with the
+        // placement ratchet then keeping it up there).
         let streamingActive = viewModel.run.runs.contains { run in
             if case .streaming = run.state { return true }
             return false
         }
-        let fitCeiling = PanelLayout.fitHeightCeiling(
-            streaming: streamingActive, allowed: allowed, screenCeiling: ceiling
-        )
+        let fitCeiling = allowed
 
         // Publish how much height is actually left for the result list at that
         // allowance given the current chrome. The page reader and the card
@@ -1113,17 +1114,6 @@ enum PanelLayout {
             screenCeiling,
             Swift.max(roomBelowTop, currentHeight, Swift.max(minHeight, chrome + resultFloor))
         )
-    }
-
-    /// Overall fit ceiling for the current phase. Streaming stays inside the
-    /// down-room allowance (the panel fills toward the screen bottom, then the
-    /// bodies scroll); a settled run may use the whole usable screen — the one
-    /// closing fit lifts the top edge by the remaining shortfall so the parked
-    /// panel opens to its content instead of stopping at a mid height.
-    static func fitHeightCeiling(
-        streaming: Bool, allowed: CGFloat, screenCeiling: CGFloat
-    ) -> CGFloat {
-        streaming ? allowed : Swift.max(allowed, screenCeiling)
     }
 
     /// A result height is fit only when it belongs to the visible mode and no

@@ -1,5 +1,22 @@
 # Panel follow-ups
 
+**2026-09-18: the closing fit is gone — placement is never lifted.**
+Reverses the "mid-height stall on completion" entry below. The phase-dependent
+ceiling (`PanelLayout.fitHeightCeiling`) is deleted; `fitCeiling` is now always
+the down-room allowance, in both phases and both modes.
+
+Why: opening to the whole screen moves the panel out from under the reader at
+the exact moment they are about to interact with it. Measured with the panel
+parked low — normal mode, on settle: height 753 → 841 with the top edge
+288 → 276; page mode: y 276 → 82 (and h 841 → 1035) the moment the mode came
+on, because an article has no natural end for the fit to open to, so *every*
+fit wanted the whole screen. The placement ratchet then kept the panel up
+there, so switching back and forth walked it to the top of the screen.
+
+The trade this gives up is the original one: a panel parked low no longer
+opens itself to a long result's full height — the content scrolls inside the
+window instead, and the reader drags the panel if they want more room.
+
 **2026-07-22 (2): the closing fit opens the panel; budget is water-filled.**
 Two follow-ups on top of "placement never shrinks":
 

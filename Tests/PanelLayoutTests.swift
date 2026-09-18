@@ -685,26 +685,6 @@ final class PanelLayoutTests: XCTestCase {
         )
     }
 
-    // MARK: - Phase fit ceiling
-
-    func testStreamingFitStaysInsideTheDownRoom() {
-        // Mid-stream growth fills toward the screen bottom and then scrolls —
-        // it never lifts the user's top edge.
-        XCTAssertEqual(
-            PanelLayout.fitHeightCeiling(streaming: true, allowed: 475, screenCeiling: 1007),
-            475
-        )
-    }
-
-    func testSettledFitMayUseTheWholeScreen() {
-        // The closing fit may lift the top edge by the shortfall, so a parked
-        // panel opens to its content instead of stopping at a mid height.
-        XCTAssertEqual(
-            PanelLayout.fitHeightCeiling(streaming: false, allowed: 475, screenCeiling: 1007),
-            1007
-        )
-    }
-
     // MARK: - Water-filling budget split
 
     func testCapsSplitEvenlyWhileAllCardsAreUnknown() {
