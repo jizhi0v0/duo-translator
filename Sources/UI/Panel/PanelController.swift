@@ -164,6 +164,25 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// the outgoing view can report once more after the model has changed; that
     /// stale height must never be fitted against the new layout.
     private var resultMeasurementPageMode = false
+    /// Height a mode switch installed from `reusableResultHeight`, and the mode
+    /// it belongs to. A cache is only reused for a settled run of the same
+    /// generation, so that height *is* the mode's true one — which makes every
+    /// smaller measurement arriving right after the switch a transient from the
+    /// rebuilt subtree (the cards report their reserved floors before their text
+    /// views re-measure). Accepting those shrank the window and sprang it back
+    /// one frame later: leaving page mode measured 288, then 228, then 524, and
+    /// the panel visibly bounced. The floor holds until a measurement reaches
+    /// it, and only for the run it was taken from — a translation started right
+    /// after the switch legitimately measures shorter (cards back to their
+    /// placeholders), and must not be held up by the previous run's height.
+    ///
+    /// It also expires. The rebuild's transients all land within ~30ms, while a
+    /// deliberate shrink (collapsing a card right after the switch) is a real
+    /// measurement below the floor that would otherwise never release it; the
+    /// deadline caps any such stall instead of leaving the window stuck tall.
+    private var modeSwitchResultFloor:
+        (pageMode: Bool, height: CGFloat, generation: Int, expires: Date)?
+    private static let modeSwitchFloorLifetime: TimeInterval = 0.25
     /// Set when the new mode's width is installed before its first height has
     /// arrived. While set, `refit` holds the current window height.
     private var awaitingResultMeasurementForPageMode: Bool?
@@ -332,8 +351,16 @@ final class PanelController: NSObject, NSWindowDelegate {
             }
     }
 
-    /// Resize the panel's width for the current mode, keeping the top edge and
-    /// horizontal center fixed and staying on screen. Height is left to `refit`.
+    /// Resize the panel's width for the current mode, keeping the top *and left*
+    /// edges fixed and staying on screen. Height is left to `refit`.
+    ///
+    /// The left edge is what the toolbar is anchored to. Re-centering instead
+    /// slid every toolbar button 100pt sideways on each mode switch (page mode
+    /// is 200pt wider), out from under the pointer that had just clicked one —
+    /// which is what read as "the button jumps", first on the page toggle and
+    /// then, once the height bounce was fixed, on the pin next to it. Growing
+    /// rightward keeps them still; the screen clamp below still applies, so a
+    /// panel already against the right edge moves by whatever it must to fit.
     private func applyModeWidth(pageMode: Bool) {
         let targetWidth = pageMode ? Self.pageModeWidth : Self.defaultSize.width
 
@@ -344,7 +371,13 @@ final class PanelController: NSObject, NSWindowDelegate {
             resultHeightMeasured = cached
             resultMeasurementPageMode = pageMode
             awaitingResultMeasurementForPageMode = nil
+            modeSwitchResultFloor = (
+                pageMode: pageMode, height: cached,
+                generation: viewModel.run.runGeneration,
+                expires: Date().addingTimeInterval(Self.modeSwitchFloorLifetime)
+            )
         } else {
+            modeSwitchResultFloor = nil
             // If the new SwiftUI view reported before this onChange callback,
             // keep that measurement. Otherwise hold until the first new-mode
             // value arrives; an in-flight translation must not reuse an older
@@ -359,8 +392,6 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
 
         var frame = panel.frame
-        let centerX = frame.midX
-        frame.origin.x = centerX - targetWidth / 2
         frame.size.width = targetWidth
 
         if let visible = (panel.screen ?? NSScreen.main)?.visibleFrame {
@@ -392,6 +423,19 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// update makes the two pieces of layout state consistent.
     private func acceptResultHeight(_ height: CGFloat, pageMode: Bool) {
         guard pageMode == viewModel.pageMode else { return }
+        // A mode switch's cached height outranks the rebuilt subtree's first,
+        // still-settling measurements (see `modeSwitchResultFloor`). Reaching
+        // the floor means the new layout has caught up and normal fitting —
+        // including shrinking, when the content really does get shorter —
+        // resumes.
+        if let floor = modeSwitchResultFloor {
+            if floor.generation != viewModel.run.runGeneration || Date() > floor.expires {
+                modeSwitchResultFloor = nil
+            } else if floor.pageMode == pageMode {
+                guard height >= floor.height - 1 else { return }
+                modeSwitchResultFloor = nil
+            }
+        }
         resultHeightMeasured = height
         resultMeasurementPageMode = pageMode
         cachedResultHeights[pageMode] = CachedResultHeight(
@@ -407,15 +451,20 @@ final class PanelController: NSObject, NSWindowDelegate {
         refit()
     }
 
-    /// Cached measurements are safe for an unchanged, settled run. Streaming
-    /// output can change while its mode is hidden, so that path always waits for
-    /// a fresh TextKit/SwiftUI measurement instead of flashing a stale height.
+    /// The incoming mode's own last height, for the same run. Within a run a
+    /// mode's content only grows (appends are the only edit), so this is a valid
+    /// lower bound even mid-stream — which is why streaming is no longer
+    /// excluded. It used to be, on the grounds that a hidden mode's text may
+    /// have grown and the cached value would flash too short; what actually
+    /// happened was worse, because the switch then had nothing to install and
+    /// the rebuilt subtree's placeholder measurement took over: leaving page
+    /// mode mid-stream collapsed the window to the cards' 533pt placeholder and
+    /// sprang back to 841pt 21ms later. Installing the lower bound, and holding
+    /// it as `modeSwitchResultFloor` so the placeholders can't undercut it,
+    /// turns that into one step plus a small upward correction in the direction
+    /// the streaming window is growing anyway.
     private func reusableResultHeight(forPageMode pageMode: Bool) -> CGFloat? {
         guard !viewModel.run.runs.isEmpty,
-              viewModel.run.runs.allSatisfy({ run in
-                  if case .streaming = run.state { return false }
-                  return true
-              }),
               let cached = cachedResultHeights[pageMode],
               cached.runGeneration == viewModel.run.runGeneration else { return nil }
         return min(cached.height, viewModel.resultAreaBudget)
