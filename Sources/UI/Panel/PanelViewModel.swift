@@ -42,6 +42,15 @@ final class PanelViewModel: ObservableObject {
     /// as a value the input/result views (which observe this VM, not the nested
     /// session) can react to. Driven by `AppCoordinator` alongside the phase.
     @Published var ocrRecognizing = false
+    /// Active link-translation session (source URL + fetch state). When set, a
+    /// link chip rides at the top of the input box like the OCR attachment. Nil
+    /// for non-link flows; cleared by `showInput`/`close` so a stale link can't
+    /// linger into another open.
+    @Published var link: LinkSession?
+    /// True only while the article fetch is in flight. Mirrors
+    /// `link.phase == .fetching` as a value the input view (which observes this
+    /// VM, not the nested session) can react to; driven by `AppCoordinator`.
+    @Published var linkFetching = false
     /// Transient error / hint shown under the header.
     @Published var notice: String?
     /// Optional actionable button shown alongside `notice` — e.g. a permission

@@ -25,6 +25,8 @@ final class SettingsStore: ObservableObject {
         static let resultBodyHeightByEngine = "resultBodyHeightByEngine"
         static let ocrVisionLevel = "ocrVisionLevel"
         static let panelTopLeftByScreen = "panelTopLeftByScreen"
+        /// 链接翻译: executable path of the Chromium browser agent-browser drives.
+        static let linkBrowserPath = "linkBrowserPath"
     }
 
     @Published var firstLanguage: String {
@@ -87,6 +89,11 @@ final class SettingsStore: ObservableObject {
     @Published var ocrVisionLevel: String {
         didSet { defaults.set(ocrVisionLevel, forKey: Keys.ocrVisionLevel) }
     }
+    /// 链接翻译: executable path of the Chromium browser agent-browser drives.
+    /// Empty = auto-pick the first detected browser.
+    @Published var linkBrowserPath: String {
+        didSet { defaults.set(linkBrowserPath, forKey: Keys.linkBrowserPath) }
+    }
 
     let defaults: UserDefaults
 
@@ -102,6 +109,7 @@ final class SettingsStore: ObservableObject {
         panelTopLeftByScreen =
             defaults.dictionary(forKey: Keys.panelTopLeftByScreen) as? [String: [Double]] ?? [:]
         ocrVisionLevel = defaults.string(forKey: Keys.ocrVisionLevel) ?? "accurate"
+        linkBrowserPath = defaults.string(forKey: Keys.linkBrowserPath) ?? ""
 
         // Provider/config: load the current schema, else migrate from the legacy
         // `engineProfiles`/`ocrProvider` shape, else seed a default.

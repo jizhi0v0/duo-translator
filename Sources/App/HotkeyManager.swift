@@ -5,6 +5,7 @@ extension KeyboardShortcuts.Name {
     static let openInputWindow = Self("openInputWindow", default: .init(.a, modifiers: [.option]))
     static let ocrTranslate = Self("ocrTranslate", default: .init(.s, modifiers: [.option]))
     static let ocrToInput = Self("ocrToInput", default: .init(.s, modifiers: [.option, .shift]))
+    static let translateLink = Self("translateLink", default: .init(.l, modifiers: [.option]))
 }
 
 @MainActor
@@ -21,6 +22,9 @@ final class HotkeyManager {
         }
         KeyboardShortcuts.onKeyUp(for: .ocrToInput) { [weak coordinator] in
             coordinator?.ocrToInput()
+        }
+        KeyboardShortcuts.onKeyUp(for: .translateLink) { [weak coordinator] in
+            coordinator?.translateLink()
         }
     }
 }

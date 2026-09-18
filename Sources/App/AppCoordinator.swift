@@ -181,6 +181,76 @@ final class AppCoordinator {
         }
     }
 
+    // MARK: - 链接翻译
+
+    /// Menu / hotkey entry: translate the link on the clipboard. Like OCR, this
+    /// is a dedicated flow gated on the current clipboard — here, that it holds a
+    /// single http/https URL. Non-URL clipboards get a notice rather than a run.
+    func translateLink() {
+        guard let url = ClipboardURL.read() else {
+            panel.showNotice("剪贴板不是有效链接。复制一个网页地址后再试。")
+            return
+        }
+        beginLink(url: url)
+    }
+
+    /// Present the link panel for a URL and start fetching its article body.
+    private func beginLink(url: URL) {
+        let session = panel.showLink(url: url)
+        // 重新抓取 re-runs the fetch on the same URL. Weak `session`: the closure is
+        // stored on the session itself.
+        session.reFetch = { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.fetch(into: session)
+        }
+        fetch(into: session)
+    }
+
+    /// Fetch `session`'s URL via agent-browser, extract the article body, and
+    /// drive its phase. On success the body lands in the panel's input box (single
+    /// source of truth), the panel switches to page mode (a long article reads
+    /// best as a bilingual document), and translation starts. Errors stay on the
+    /// link chip (never `showNotice`). Guards on the panel's current session so a
+    /// dismissed / superseded fetch can't apply.
+    private func fetch(into session: LinkSession) {
+        session.phase = .fetching
+        session.action = nil
+        panel.viewModel.inputText = ""
+        panel.viewModel.linkFetching = true
+        Task { @MainActor in
+            do {
+                guard let binary = AgentBrowser.bundledBinary else {
+                    throw AgentBrowser.AgentBrowserError.unavailable
+                }
+                guard let browser = BrowserScanner.resolve(preferred: SettingsStore.shared.linkBrowserPath) else {
+                    throw AgentBrowser.AgentBrowserError.noBrowser
+                }
+                let article = try await AgentBrowser.read(url: session.url, browserPath: browser, binary: binary)
+                // Superseded by a new flow while fetching: drop this result.
+                guard panel.viewModel.link === session else { return }
+                panel.viewModel.linkFetching = false
+                Log.app.debug("链接翻译: 正文 \(article.text.count, privacy: .public) 字")
+                session.title = article.title
+                session.text = article.text
+                session.phase = .done
+                panel.viewModel.inputText = article.text
+                // A fetched article reads best as a bilingual document → page mode.
+                if !panel.viewModel.pageMode { panel.viewModel.togglePageMode() }
+                panel.viewModel.translate()
+            } catch {
+                guard panel.viewModel.link === session else { return }
+                panel.viewModel.linkFetching = false
+                session.phase = .failed(error.localizedDescription)
+                // No browser to drive the fetch → offer a jump to settings.
+                if case AgentBrowser.AgentBrowserError.noBrowser = error {
+                    session.action = PanelNoticeAction(title: "打开设置") { [weak self] in
+                        self?.openSettings()
+                    }
+                }
+            }
+        }
+    }
+
     /// Attach a "打开系统设置" button to permission-related capture failures so the
     /// notice is a one-tap fix rather than a dead end.
     private static func settingsAction(for error: Error) -> PanelNoticeAction? {

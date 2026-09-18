@@ -50,6 +50,8 @@ final class SettingsWindowController: NSWindowController {
                 label: "引擎", symbol: "engine.combustion", size: NSSize(width: 620, height: 460))
         addPane(OCRSettingsView(settings: settings),
                 label: "OCR", symbol: "text.viewfinder", size: NSSize(width: 620, height: 400))
+        addPane(LinkSettingsView(settings: settings),
+                label: "链接", symbol: "link", size: NSSize(width: 620, height: 280))
         // Hotkeys pane is pure AppKit, not a SwiftUI `NSHostingController`.
         // Hosting the `KeyboardShortcuts.Recorder`s in SwiftUI (inside this
         // `NSTabViewController`) left only the first recorder able to become
@@ -85,6 +87,7 @@ final class HotkeyPaneViewController: NSViewController {
         ("输入翻译", .openInputWindow),
         ("截图翻译", .ocrTranslate),
         ("截图取字", .ocrToInput),
+        ("链接翻译", .translateLink),
     ]
 
     override func loadView() {

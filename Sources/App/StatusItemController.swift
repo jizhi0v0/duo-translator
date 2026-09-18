@@ -28,6 +28,8 @@ final class StatusItemController: NSObject {
         menu.addItem(makeItem("截图翻译", #selector(ocrTranslate), keyEquivalent: ""))
         menu.addItem(makeItem("截图取字", #selector(ocrToInput), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(makeItem("链接翻译", #selector(translateLink), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(makeItem("统计…", #selector(openStats), keyEquivalent: ""))
         menu.addItem(makeItem("设置…", #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
@@ -46,6 +48,7 @@ final class StatusItemController: NSObject {
     @objc private func translateSelection() { coordinator.translateSelection() }
     @objc private func ocrTranslate() { coordinator.ocrTranslate() }
     @objc private func ocrToInput() { coordinator.ocrToInput() }
+    @objc private func translateLink() { coordinator.translateLink() }
     @objc private func openStats() { coordinator.openStats() }
     @objc private func openSettings() { coordinator.openSettings() }
     @objc private func quit() { NSApp.terminate(nil) }

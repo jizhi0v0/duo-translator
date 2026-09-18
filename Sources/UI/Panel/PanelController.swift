@@ -493,10 +493,12 @@ final class PanelController: NSObject, NSWindowDelegate {
         defer {
             Log.app.debug("面板: showInput 同步 \(String(format: "%.1f", Date().timeIntervalSince(t0) * 1000), privacy: .public)ms, 首次=\(firstShow, privacy: .public)")
         }
-        // A non-OCR open drops any lingering OCR session so a 划词 / plain-input
-        // panel never shows a stale screenshot attachment.
+        // A non-OCR open drops any lingering OCR / link session so a 划词 /
+        // plain-input panel never shows a stale screenshot or link attachment.
         viewModel.ocr = nil
         viewModel.ocrRecognizing = false
+        viewModel.link = nil
+        viewModel.linkFetching = false
         if let prefill {
             viewModel.inputText = prefill
             // Capture-to-input (取字, no auto translate) starts no run, so the
@@ -525,6 +527,9 @@ final class PanelController: NSObject, NSWindowDelegate {
         viewModel.inputText = ""
         viewModel.run.clear()
         viewModel.clearNotice()
+        // Switching into OCR drops any lingering link chip.
+        viewModel.link = nil
+        viewModel.linkFetching = false
         let session = OCRSession(cgImage: cgImage)
         viewModel.ocr = session
         viewModel.ocrRecognizing = true
@@ -535,6 +540,30 @@ final class PanelController: NSObject, NSWindowDelegate {
         // because `inputFocused` is false while recognizing.
         DispatchQueue.main.async { [weak self] in
             guard let self, self.viewModel.ocrRecognizing else { return }
+            self.panel.makeFirstResponder(nil)
+        }
+        return session
+    }
+
+    /// Show the link panel immediately (before the fetch runs): the source-link
+    /// chip rides at the top of the input with a `.fetching` state. Returns the
+    /// session so the coordinator fills in text / marks failure once
+    /// `ArticleFetcher.fetch` returns; the article body and its translation then
+    /// render in place (page mode). Mirrors `showOCR`.
+    func showLink(url: URL) -> LinkSession {
+        viewModel.inputText = ""
+        viewModel.run.clear()
+        viewModel.clearNotice()
+        viewModel.ocr = nil
+        viewModel.ocrRecognizing = false
+        let session = LinkSession(url: url)
+        viewModel.link = session
+        viewModel.linkFetching = true
+        presentPanel()
+        // As with OCR, drop the auto-selected first responder so no caret blinks
+        // over the "抓取正文中…" placeholder while the fetch is in flight.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.viewModel.linkFetching else { return }
             self.panel.makeFirstResponder(nil)
         }
         return session
@@ -576,9 +605,11 @@ final class PanelController: NSObject, NSWindowDelegate {
     func close() {
         cancelWindowDrag()
         viewModel.run.cancelAll()
-        // Closing the panel ends the OCR session too: drop the image attachment.
+        // Closing the panel ends the OCR / link session too: drop the attachment.
         viewModel.ocr = nil
         viewModel.ocrRecognizing = false
+        viewModel.link = nil
+        viewModel.linkFetching = false
         // The metrics popover is keyed by engine profile id, not by run — left
         // open, it would silently reattach itself the moment a future run for
         // the same engine finishes, popping up unasked and, on a short panel,

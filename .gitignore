@@ -9,3 +9,5 @@ dist/
 *.dSYM.zip
 *.dSYM
 .swiftpm/
+
+Vendor/

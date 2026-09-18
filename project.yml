@@ -28,6 +28,37 @@ targets:
         PRODUCT_NAME: DuoTranslator
         INFOPLIST_FILE: Configs/Info.plist
         CODE_SIGN_ENTITLEMENTS: Configs/DuoTranslator.entitlements
+        # The build scripts fetch (curl) the agent-browser binary and codesign it
+        # into Contents/Helpers — both blocked by Xcode's script sandbox.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    preBuildScripts:
+      - name: Fetch agent-browser
+        basedOnDependencyAnalysis: false
+        script: |
+          # Ensure the vendored agent-browser universal binary is present.
+          "$SRCROOT/Scripts/fetch-agent-browser.sh"
+    postCompileScripts:
+      - name: Embed & sign agent-browser
+        basedOnDependencyAnalysis: false
+        script: |
+          # Copy the vendored agent-browser CLI into Contents/Helpers and sign it
+          # (hardened runtime) so the notarized app can spawn it. The outer app
+          # signature then seals it.
+          set -e
+          SRC="$SRCROOT/Vendor/agent-browser/agent-browser"
+          DST_DIR="$CODESIGNING_FOLDER_PATH/Contents/Helpers"
+          mkdir -p "$DST_DIR"
+          cp -f "$SRC" "$DST_DIR/agent-browser"
+          # Apache-2.0 attribution goes in Resources — a plain file in Helpers/
+          # (reserved for executables) breaks the app's code signature seal.
+          mkdir -p "$CODESIGNING_FOLDER_PATH/Contents/Resources"
+          cp -f "$SRCROOT/Vendor/agent-browser/LICENSE" "$CODESIGNING_FOLDER_PATH/Contents/Resources/agent-browser-LICENSE.txt" 2>/dev/null || true
+          IDENT="${EXPANDED_CODE_SIGN_IDENTITY:--}"
+          if [ "$IDENT" = "-" ]; then
+            codesign --force --options runtime --sign - "$DST_DIR/agent-browser"
+          else
+            codesign --force --options runtime --timestamp --sign "$IDENT" "$DST_DIR/agent-browser"
+          fi
     dependencies:
       - package: KeyboardShortcuts
     scheme:

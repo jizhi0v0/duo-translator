@@ -69,6 +69,10 @@ struct PanelRootView: View {
     /// Toolbar / input / language bar / results. The OCR image, when present,
     /// rides inside the input box as an attachment (see `InputSectionView`), so
     /// this stays the single-column layout for every flow.
+    /// An async source (OCR recognition or link fetch) is in flight: the input
+    /// box holds only a placeholder, so the language bar / results stay hidden.
+    private var inputBusy: Bool { viewModel.ocrRecognizing || viewModel.linkFetching }
+
     private var mainColumn: some View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
@@ -88,17 +92,18 @@ struct PanelRootView: View {
 
                 InputSectionView(viewModel: viewModel, run: run)
                     .padding(.horizontal, 12)
-                    // While recognizing the input box is the last element (language
-                    // bar / results hidden), so give it a bottom margin matching
-                    // its side insets instead of sitting flush against the edge.
-                    .padding(.bottom, viewModel.ocrRecognizing ? 12 : 0)
+                    // While an async source is in flight (OCR / link fetch) the
+                    // input box is the last element (language bar / results
+                    // hidden), so give it a bottom margin matching its side insets
+                    // instead of sitting flush against the edge.
+                    .padding(.bottom, inputBusy ? 12 : 0)
 
-                // While recognizing there's no text yet, so there's nothing to
-                // detect a language from (showing a stale source→target pair is
-                // misleading) and nothing to translate. Hide the language bar and
-                // the separator above the empty result area until recognition
-                // finishes — the recognizing panel is just the image + "识别中…".
-                if !viewModel.ocrRecognizing {
+                // While an async source is in flight (OCR / link fetch) there's no
+                // text yet, so there's nothing to detect a language from (a stale
+                // source→target pair is misleading) and nothing to translate. Hide
+                // the language bar and the separator above the empty result area
+                // until it finishes — the busy panel is just the attachment + "…中".
+                if !inputBusy {
                     LanguageBarView(viewModel: viewModel)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)

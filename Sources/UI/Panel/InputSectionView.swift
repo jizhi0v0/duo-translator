@@ -40,12 +40,16 @@ struct InputSectionView: View {
     /// bulk of the first-layout stall when a big selection is prefilled.
     private var skipsMirror: Bool { viewModel.inputText.count > 1000 }
 
+    /// The editor is empty & disabled while an async source (OCR recognition or
+    /// link fetch) is in flight — only a "…中" placeholder shows.
+    private var inputBusy: Bool { viewModel.ocrRecognizing || viewModel.linkFetching }
+
     private var editorHeight: CGFloat {
-        // While recognizing the editor is empty & disabled (just the "识别中…"
-        // placeholder). Pin it compact so a stale `contentHeight` left over from a
-        // prior translation doesn't keep the box tall (and the window oversized,
-        // leaving a gap) until the async mirror re-measures.
-        if viewModel.ocrRecognizing { return Self.minEditorHeight }
+        // While busy the editor is empty & disabled (just the placeholder). Pin
+        // it compact so a stale `contentHeight` left over from a prior translation
+        // doesn't keep the box tall (and the window oversized, leaving a gap)
+        // until the async mirror re-measures.
+        if inputBusy { return Self.minEditorHeight }
         if skipsMirror { return Self.maxEditorHeight }
         return PanelLayout.editorHeight(content: contentHeight, min: Self.minEditorHeight, max: Self.maxEditorHeight)
     }
@@ -57,6 +61,15 @@ struct InputSectionView: View {
             // below (editor, language bar, results) is the normal panel.
             if let ocr = viewModel.ocr {
                 OCRAttachmentBar(session: ocr, onRemove: { viewModel.ocr = nil })
+                    .padding(.horizontal, 8)
+                    .padding(.top, 8)
+                    .padding(.bottom, 2)
+            }
+
+            // 链接翻译: the source-link chip rides at the top of the input box, the
+            // same slot as the OCR attachment, with its fetch status.
+            if let link = viewModel.link {
+                LinkAttachmentBar(session: link, onRemove: { viewModel.link = nil })
                     .padding(.horizontal, 8)
                     .padding(.top, 8)
                     .padding(.bottom, 2)
@@ -80,12 +93,17 @@ struct InputSectionView: View {
                             .padding(.horizontal, 10)
                             .padding(.vertical, 8)
                             .allowsHitTesting(false)
+                    } else if viewModel.linkFetching {
+                        BusyPlaceholder(text: "抓取正文中…")
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .allowsHitTesting(false)
                     }
                 }
-                // While OCR recognition is in flight there is nothing to edit yet:
+                // While an async source is in flight there is nothing to edit yet:
                 // disable the editor so it shows no cursor, takes no typing, and
                 // swallows no Enter. It re-enables the moment the text lands.
-                .disabled(viewModel.ocrRecognizing)
+                .disabled(inputBusy)
                 .focused($inputFocused)
                 .onKeyPress { press in
                     guard press.key == .return, !press.modifiers.contains(.shift) else {
@@ -95,26 +113,31 @@ struct InputSectionView: View {
                     return .handled
                 }
                 .onChange(of: viewModel.focusToken) {
-                    // Don't grab focus mid-recognition: the disabled editor would
-                    // still blink a stray caret. Recognition completion clears the
-                    // flag and bumps `focusToken` again to focus it then.
-                    if !viewModel.ocrRecognizing { inputFocused = true }
+                    // Don't grab focus mid-fetch: the disabled editor would still
+                    // blink a stray caret. Completion clears the flag and bumps
+                    // `focusToken` again to focus it then.
+                    if !inputBusy { inputFocused = true }
                 }
-                .onChange(of: viewModel.ocrRecognizing) { _, recognizing in
-                    // Entering recognition: drop focus so no caret shows over the
-                    // "识别中…" placeholder.
-                    if recognizing { inputFocused = false }
+                .onChange(of: inputBusy) { _, busy in
+                    // Entering a busy state: drop focus so no caret shows over the
+                    // placeholder.
+                    if busy { inputFocused = false }
                 }
                 .onAppear {
-                    if !viewModel.ocrRecognizing { inputFocused = true }
+                    if !inputBusy { inputFocused = true }
                 }
 
             Divider().padding(.horizontal, 10)
             footer
         }
+        // Sit the input on the same `.thinMaterial` surface the result cards use,
+        // not a 50%-opacity dynamic fill: over the translucent glass panel (and a
+        // bright wallpaper behind it) the thin fill washed out, leaving the source
+        // text low-contrast. The material gives a solid, readable backing in both
+        // light and dark, matching the cards below.
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .textBackgroundColor).opacity(0.5))
+                .fill(.thinMaterial)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8)
@@ -168,6 +191,22 @@ struct InputSectionView: View {
         .padding(.horizontal, 10)
         .padding(.top, 6)
         .padding(.bottom, 7)
+    }
+}
+
+/// A compact spinner + label overlaid on the empty input editor while an async
+/// source (currently the link fetch) is in flight. Mirrors `OCRRecognizingLabel`
+/// but takes its text directly since it has no session to observe.
+struct BusyPlaceholder: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text(text)
+                .font(.system(size: 14))
+                .foregroundStyle(.tertiary)
+        }
     }
 }
 
