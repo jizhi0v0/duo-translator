@@ -29,6 +29,12 @@ final class StreamingTextModel {
     private var generation = 0
     /// Frames left before the current backlog should be fully revealed.
     private var framesLeft = 0
+    /// Whether the reader asked to be carried along with the stream. It lives
+    /// on the model, not in the view, because the view does not survive a mode
+    /// switch: the compact card and the page reader are rebuilt around this
+    /// same model, and a reader who pressed "follow" means it for the run, not
+    /// for whichever view happened to be on screen at the time.
+    var followsStream = false
 
     /// Set by the attached text view. Called on the main actor with the chunk
     /// to append.
@@ -92,6 +98,7 @@ final class StreamingTextModel {
         fullText = ""
         revealedText = ""
         framesLeft = 0
+        followsStream = false // a new run starts at the top, following nothing
     }
 
     private func startPacing() {

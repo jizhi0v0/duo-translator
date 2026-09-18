@@ -72,7 +72,13 @@ private func documentHeight(of textView: NSTextView) -> CGFloat? {
 @MainActor
 final class FollowLatch {
     /// Appends keep the viewport pinned to the bottom.
-    private(set) var engaged = false
+    private(set) var engaged = false {
+        didSet { if engaged != oldValue { onChange?(engaged) } }
+    }
+    /// Fired when the latch flips, so the state can be parked somewhere that
+    /// outlives this view — otherwise a mode switch rebuilds the reader and
+    /// silently stops following the stream the reader asked to follow.
+    var onChange: ((Bool) -> Void)?
     /// Depth of a scroll we issued ourselves: the bounds changes it emits are
     /// ours, not the reader's, and must not flip the latch.
     private var programmaticDepth = 0
@@ -81,6 +87,16 @@ final class FollowLatch {
 
     /// A new run starts at the top, following nothing.
     func disengage() { engaged = false }
+
+    /// Restore a latch state that was parked elsewhere, without reporting it
+    /// back as a fresh decision.
+    func adopt(_ following: Bool) {
+        guard following != engaged else { return }
+        let handler = onChange
+        onChange = nil
+        engaged = following
+        onChange = handler
+    }
 
     /// The jump button: park at the bottom and stay there.
     func engage() { engaged = true }
@@ -410,6 +426,7 @@ struct StreamingTextView: NSViewRepresentable {
                 // view becomes current again so mid-stream mode switches cannot
                 // leave the visible card frozen.
                 installCallbacks(on: newModel)
+                adoptFollowState(from: newModel)
                 return
             }
             model?.onAppend = nil
@@ -423,6 +440,12 @@ struct StreamingTextView: NSViewRepresentable {
                 append(newModel.revealedText)
             }
             installCallbacks(on: newModel)
+            // Last, because `resetText` disengages: the reader's follow decision
+            // belongs to the run, so it is read back from the model this view is
+            // (re)built around — a mode switch rebuilds the view around the same
+            // model and must not quietly stop following — and written back there
+            // whenever it changes.
+            adoptFollowState(from: newModel)
         }
 
         private func scheduleHeightReport(force: Bool) {
@@ -462,6 +485,14 @@ struct StreamingTextView: NSViewRepresentable {
         }
 
         deinit { NotificationCenter.default.removeObserver(self) }
+
+        /// Bind the latch to the run's stored follow state, in both directions,
+        /// and take up the position that state implies.
+        private func adoptFollowState(from model: StreamingTextModel) {
+            follow.onChange = { [weak model] engaged in model?.followsStream = engaged }
+            follow.adopt(model.followsStream)
+            if follow.engaged, !suppressFollow { scrollToBottom() }
+        }
 
         private func installCallbacks(on model: StreamingTextModel) {
             model.onAppend = { [weak self] chunk in
@@ -855,6 +886,17 @@ struct PageReaderView: NSViewRepresentable {
             } else if ceilingChanged {
                 scheduleHeightReport(force: true)
             }
+            // After the rebuild, which disengages on a scroll reset: follow is
+            // the run's state, not this view's, so switching modes mid-stream
+            // keeps carrying the reader along.
+            adoptFollowState(from: newModel)
+        }
+
+        /// See the card coordinator's twin.
+        private func adoptFollowState(from model: StreamingTextModel) {
+            follow.onChange = { [weak model] engaged in model?.followsStream = engaged }
+            follow.adopt(model.followsStream)
+            if follow.engaged, !suppressFollow { pinToBottom() }
         }
 
         private func rebuildContent(resetScroll: Bool) {
