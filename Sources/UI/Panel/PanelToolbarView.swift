@@ -18,6 +18,11 @@ struct PanelToolbarView: View {
             ToolbarIconButton(
                 systemName: viewModel.isPinned ? "pin.fill" : "pin",
                 isActive: viewModel.isPinned,
+                // Tilted while pinned, the way a pin actually sits once it is
+                // pushed in. The accent tint alone read as a hover state at a
+                // glance; the angle makes the engaged state obvious without
+                // looking twice.
+                rotation: viewModel.isPinned ? .degrees(-40) : .zero,
                 help: viewModel.isPinned ? "取消固定" : "固定窗口（点击其他区域不关闭）"
             ) {
                 viewModel.isPinned.toggle()
@@ -74,6 +79,9 @@ struct ToolbarIconButton: View {
     let systemName: String
     var isActive: Bool = false
     var hoverTint: Color? = nil
+    /// Tilt applied to the glyph only — the button's frame, hover circle and
+    /// hit area stay put, so a rotating glyph can't move the row.
+    var rotation: Angle = .zero
     let help: String
     let action: () -> Void
 
@@ -94,6 +102,7 @@ struct ToolbarIconButton: View {
             Image(systemName: systemName)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(glyphColor)
+                .rotationEffect(rotation)
                 .frame(width: 24, height: 24)
                 .background(
                     Circle().fill((hoverTint ?? .secondary).opacity(fillOpacity))
@@ -103,6 +112,7 @@ struct ToolbarIconButton: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: 0.15), value: rotation)
         .help(help)
     }
 }
