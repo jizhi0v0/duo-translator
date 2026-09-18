@@ -859,6 +859,12 @@ struct PageReaderView: NSViewRepresentable {
 
         private func rebuildContent(resetScroll: Bool) {
             guard let textView else { return }
+            // 仅译文 ↔ 对照 replaces the document in place, and 仅译文 is the
+            // shorter of the two: a reader parked at the bottom was left at an
+            // offset past the new end, which paints blank until AppKit gets
+            // around to clamping it — the flash of empty page on every toggle.
+            // Keeping the bottom is also what the reader means by being there.
+            let wasAtBottom = !resetScroll && viewportState().atBottom
             applyProjection()
             // A rebuild replaces the document (new run, 仅译文 ↔ 对照), so it may
             // legitimately be shorter than what was last reported.
@@ -868,9 +874,41 @@ struct PageReaderView: NSViewRepresentable {
             if resetScroll {
                 follow.disengage() // a new run starts at the top, following nothing
                 follow.duringProgrammaticScroll { textView.scroll(.zero) }
+            } else if wasAtBottom {
+                pinToBottom()
+            } else {
+                clampScrollIntoDocument()
             }
             scheduleHeightReport(force: true)
             reportScrollState()
+        }
+
+        /// Scroll to the end of the text, without touching the follow latch —
+        /// this is restoring a position, not adopting the stream.
+        private func pinToBottom() {
+            guard let textView, let storage = textView.textStorage else { return }
+            follow.duringProgrammaticScroll {
+                textView.scrollRangeToVisible(NSRange(location: storage.length, length: 0))
+            }
+        }
+
+        /// Pull the viewport back inside a document that just got shorter. AppKit
+        /// does this eventually; doing it in the same turn as the replacement is
+        /// what keeps the blank frame off screen.
+        ///
+        /// Measured, not read off `frame.height`: right after the storage is
+        /// replaced that frame still describes the *previous* document (2450pt
+        /// where the new one is 683), so a frame-based clamp decides there is
+        /// nothing to do and leaves the reader staring at blank space.
+        private func clampScrollIntoDocument() {
+            guard let textView, let clip = textView.enclosingScrollView?.contentView,
+                  let height = documentHeight(of: textView) else { return }
+            let maxY = max(0, height - clip.bounds.height)
+            guard clip.bounds.origin.y > maxY + 0.5 else { return }
+            follow.duringProgrammaticScroll {
+                clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: maxY))
+                textView.enclosingScrollView?.reflectScrolledClipView(clip)
+            }
         }
 
         private func append(_ chunk: String) {
