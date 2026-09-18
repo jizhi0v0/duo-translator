@@ -82,8 +82,10 @@ struct StatsView: View {
     private var requestsPerDayChart: some View {
         section("每日请求数") {
             Chart(requestsPerDay, id: \.self) { item in
+                // `plotted`, not `count`: see `StatsChartLayout` — a lone
+                // failure among hundreds is otherwise sub-pixel.
                 BarMark(x: .value("日期", item.day, unit: .day),
-                        y: .value("请求数", item.count))
+                        y: .value("请求数", item.plotted))
                 .foregroundStyle(by: .value("状态", item.status))
             }
             .chartForegroundStyleScale([
@@ -148,19 +150,37 @@ struct StatsView: View {
         return store.records.map(\.durationSeconds).reduce(0, +) / Double(store.records.count)
     }
 
-    private struct DayBucket: Hashable { let day: Date; let status: String; let count: Int }
+    private struct DayBucket: Hashable {
+        let day: Date
+        let status: String
+        let count: Int
+        /// Bar height, which differs from `count` only where a segment would
+        /// otherwise be invisible. See `StatsChartLayout`.
+        let plotted: Double
+    }
 
     private var requestsPerDay: [DayBucket] {
         let cal = Calendar.current
-        var counts: [DayBucket: Int] = [:]
+        var byDay: [Date: [String: Int]] = [:]
         for r in store.records {
             let day = cal.startOfDay(for: r.date)
-            let key = DayBucket(day: day, status: statusLabel(r.status), count: 0)
-            counts[key, default: 0] += 1
+            byDay[day, default: [:]][statusLabel(r.status), default: 0] += 1
         }
-        return counts.map { DayBucket(day: $0.key.day, status: $0.key.status, count: $0.value) }
-            .sorted { $0.day < $1.day }
+        let axisMax = byDay.values.map { $0.values.reduce(0, +) }.max() ?? 0
+        return byDay.keys.sorted().flatMap { day -> [DayBucket] in
+            let counts = byDay[day] ?? [:]
+            // Stable order, so the stack reads the same way every day.
+            let segments = Self.statusOrder
+                .filter { counts[$0] != nil }
+                .map { (status: $0, count: counts[$0] ?? 0) }
+            return StatsChartLayout.plotted(
+                segments: segments, axisMax: axisMax, successLabel: Self.successLabel
+            ).map { DayBucket(day: day, status: $0.status, count: $0.count, plotted: $0.plotted) }
+        }
     }
+
+    private static let successLabel = "成功"
+    private static let statusOrder = ["成功", "失败", "取消"]
 
     private var tokensByEngine: [(engine: String, tokens: Int)] {
         var sums: [String: Int] = [:]
