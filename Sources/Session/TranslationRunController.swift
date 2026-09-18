@@ -166,6 +166,10 @@ final class TranslationRunController: ObservableObject {
         let target = request.targetLanguage
         let inputChars = request.text.count
         tasks[run.id] = Task { [weak run] in
+            // One silent retry is allowed before the first token lands; see
+            // `RunRetryPolicy` for why that is the only place it is safe.
+            var attempt = 0
+            while true {
             let started = Date()
             // First token of any kind (content or reasoning): reasoning models
             // emit their chain-of-thought before the translation, and that is
@@ -263,11 +267,22 @@ final class TranslationRunController: ObservableObject {
                 }
             } catch {
                 guard let run else { return }
+                if RunRetryPolicy.shouldRetry(
+                    after: error, receivedFirstToken: firstTokenAt != nil, attempt: attempt
+                ) {
+                    attempt += 1
+                    Log.engine.debug("引擎[\(run.name, privacy: .public)] 首 token 前断连，自动重试一次：\(error.localizedDescription, privacy: .public)")
+                    try? await Task.sleep(for: RunRetryPolicy.backoff)
+                    if Task.isCancelled { return }
+                    continue
+                }
                 run.stream.finish()
                 run.thinkingStream.finish()
                 run.state = .failed(message: error.localizedDescription)
                 Self.record(run, source: detected, target: target, inputChars: inputChars,
                             duration: Date().timeIntervalSince(started), status: .failed)
+            }
+            return
             }
         }
     }
@@ -403,3 +418,4 @@ final class TranslationRunController: ObservableObject {
         return chunks
     }
 }
+
