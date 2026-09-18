@@ -29,9 +29,6 @@ final class StreamingTextModel {
     private var generation = 0
     /// Frames left before the current backlog should be fully revealed.
     private var framesLeft = 0
-    /// Set when the engine is done: the remaining backlog is then revealed over
-    /// a shorter horizon, so the tail doesn't drag on past the "done" badge.
-    private var finishing = false
 
     /// Set by the attached text view. Called on the main actor with the chunk
     /// to append.
@@ -44,9 +41,6 @@ final class StreamingTextModel {
     /// Whatever is buffered is spread across this window. Long enough to smooth
     /// out a bursty stream, short enough that the text never feels held back.
     private static let horizon: TimeInterval = 0.25
-    /// Tighter horizon once the engine has finished, so the last slices land
-    /// promptly instead of typing on after the run is visibly done.
-    private static let finishingHorizon: TimeInterval = 0.08
 
     func append(_ chunk: String) {
         guard !chunk.isEmpty else { return }
@@ -73,16 +67,23 @@ final class StreamingTextModel {
         onReset?()
     }
 
-    /// The engine stopped producing. `fullText` is already complete — only the
-    /// visible tail is still catching up, and it now does so against the tighter
-    /// finishing deadline.
+    /// The engine stopped producing: reveal whatever is left in one slice.
+    ///
+    /// Pacing the tail out past the engine's own finish is what made a card that
+    /// already showed its "done" badge keep growing — measured, the last ~23
+    /// characters landed 49ms after the run settled and pushed the panel 22pt
+    /// (one wrapped line) taller. The backlog at this point is at most one
+    /// reveal window, so dropping it in costs no jank, and the final height now
+    /// lands together with the finished state.
     func finish() {
-        finishing = true
-        framesLeft = min(
-            framesLeft,
-            StreamingPacer.frames(horizon: Self.finishingHorizon, tick: Self.tick)
-        )
-        if pending.isEmpty { stopPacing() }
+        if !pending.isEmpty {
+            let rest = pending
+            pending = ""
+            revealedText += rest
+            onAppend?(rest)
+        }
+        framesLeft = 0
+        stopPacing()
     }
 
     private func clear() {
@@ -90,7 +91,6 @@ final class StreamingTextModel {
         pending = ""
         fullText = ""
         revealedText = ""
-        finishing = false
         framesLeft = 0
     }
 

@@ -58,6 +58,46 @@ private func documentHeight(of textView: NSTextView) -> CGFloat? {
     return bottom + textView.textContainerInset.height * 2
 }
 
+/// Sticky follow-the-stream state, shared by both streaming readers.
+///
+/// "Is the viewport at the bottom right now?" cannot decide this on its own.
+/// The scroll that parks the reader at the bottom is measured against a
+/// document frame TextKit 2 has not finished growing, so one chunk later the
+/// very same offset reads as "a line or two above the bottom": following
+/// switched itself off for the rest of the run, and the half-caught-up scrolls
+/// on the way there read as the text popping upward. The reader's *intent* is
+/// latched instead — reaching the bottom turns following on, and only the
+/// reader scrolling away turns it off. Growth of the document or of the card's
+/// viewport never touches it.
+@MainActor
+final class FollowLatch {
+    /// Appends keep the viewport pinned to the bottom.
+    private(set) var engaged = false
+    /// Depth of a scroll we issued ourselves: the bounds changes it emits are
+    /// ours, not the reader's, and must not flip the latch.
+    private var programmaticDepth = 0
+
+    var isProgrammatic: Bool { programmaticDepth > 0 }
+
+    /// A new run starts at the top, following nothing.
+    func disengage() { engaged = false }
+
+    /// The jump button: park at the bottom and stay there.
+    func engage() { engaged = true }
+
+    /// A scroll the reader performed (wheel, trackpad, scroller, keyboard).
+    func userScrolled(atBottom: Bool) {
+        guard !isProgrammatic else { return }
+        engaged = atBottom
+    }
+
+    func duringProgrammaticScroll(_ body: () -> Void) {
+        programmaticDepth += 1
+        body()
+        programmaticDepth -= 1
+    }
+}
+
 /// TextKit 2 backed streaming result view.
 ///
 /// Performance rules (do not break):
@@ -188,6 +228,12 @@ struct StreamingTextView: NSViewRepresentable {
         private var onScrollStateChange: ((Bool) -> Void)?
         private var lastJumpToken = 0
         private var lastReportedJumpVisible = false
+        private let follow = FollowLatch()
+        private var followCatchUpScheduled = false
+        /// Geometry at the last bounds notification, so a scroll caused by the
+        /// document or the viewport growing can be told from the reader's own.
+        private var lastObservedDocHeight: CGFloat = 0
+        private var lastObservedVisibleHeight: CGFloat = 0
 
         /// One-time wiring of the views.
         func setup(
@@ -207,6 +253,30 @@ struct StreamingTextView: NSViewRepresentable {
                     name: NSView.boundsDidChangeNotification, object: clip
                 )
             }
+            observeLiveScroll(on: textView.enclosingScrollView)
+        }
+
+
+        /// Live-scroll notifications are the one unambiguous "the reader did
+        /// this" signal: `NSScrollView` posts them for wheel, trackpad and
+        /// scroller-drag gestures, never for a programmatic scroll.
+        private func observeLiveScroll(on scrollView: NSScrollView?) {
+            guard let scrollView else { return }
+            for name in [
+                NSScrollView.didLiveScrollNotification,
+                NSScrollView.didEndLiveScrollNotification,
+            ] {
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(userLiveScrolled),
+                    name: name, object: scrollView
+                )
+            }
+        }
+
+        @objc private func userLiveScrolled() {
+            guard !suppressFollow else { return }
+            follow.userScrolled(atBottom: viewportState().atBottom)
+            reportScrollState()
         }
 
         // MARK: Follow-the-stream
@@ -224,14 +294,40 @@ struct StreamingTextView: NSViewRepresentable {
             let increased = token > lastJumpToken
             lastJumpToken = token
             guard increased else { return }
+            follow.engage()
             DispatchQueue.main.async { [weak self] in
-                self?.textView?.scrollToEndOfDocument(nil)
+                self?.scrollToBottom()
                 self?.reportScrollState()
             }
         }
 
         @objc private func scrollBoundsChanged() {
+            classifyBoundsChange()
             reportScrollState()
+        }
+
+        /// Decide what moved. Ours: ignore. The document or the viewport having
+        /// grown: layout, not the reader — keep the pin and re-apply it, since
+        /// the old offset is no longer the bottom. Nothing else changed: the
+        /// reader scrolled, and where they left it decides whether we follow.
+        private func classifyBoundsChange() {
+            guard let textView, let clip = textView.enclosingScrollView?.contentView else { return }
+            let docHeight = textView.frame.height
+            let visibleHeight = clip.bounds.height
+            let geometryMoved = abs(docHeight - lastObservedDocHeight) > 0.5
+                || abs(visibleHeight - lastObservedVisibleHeight) > 0.5
+            lastObservedDocHeight = docHeight
+            lastObservedVisibleHeight = visibleHeight
+            // A window drag is neither: the controller restores the frozen
+            // offsets for the whole gesture, and against a document that keeps
+            // growing underneath, those restores would read as the reader
+            // scrolling away from the bottom and drop the pin.
+            guard !follow.isProgrammatic, !suppressFollow else { return }
+            if geometryMoved {
+                if follow.engaged { scheduleFollowCatchUp() }
+            } else {
+                follow.userScrolled(atBottom: viewportState().atBottom)
+            }
         }
 
         /// (overflowing, atBottom) for the current viewport. Before any text has
@@ -256,7 +352,10 @@ struct StreamingTextView: NSViewRepresentable {
         private func reportScrollState() {
             guard let handler = onScrollStateChange else { return }
             let state = viewportState()
-            let jumpVisible = state.overflowing && !state.atBottom
+            // Not while following: mid-stream the pin is routinely a line short
+            // of the bottom for a frame, and reading that as "you are behind"
+            // flashed the button over text that is already chasing the stream.
+            let jumpVisible = state.overflowing && !state.atBottom && !follow.engaged
             guard jumpVisible != lastReportedJumpVisible else { return }
             lastReportedJumpVisible = jumpVisible
             DispatchQueue.main.async { handler(jumpVisible) }
@@ -375,17 +474,56 @@ struct StreamingTextView: NSViewRepresentable {
 
         private func append(_ chunk: String) {
             guard let textView, let storage = textView.textStorage else { return }
-            // Terminal-style follow: only when the reader already parked at the
-            // bottom of an overflowing body does the view chase the stream. The
-            // default reading position (the top) never moves on its own.
-            let state = viewportState()
-            let follow = !suppressFollow && state.overflowing && state.atBottom
             storage.beginEditing()
             storage.append(NSAttributedString(string: chunk, attributes: attributes))
             storage.endEditing()
-            if follow { textView.scrollToEndOfDocument(nil) }
+            // Terminal-style follow: only a reader who parked at the bottom is
+            // carried along. The default reading position (the top) never moves
+            // on its own, and once parked the latch keeps the pin even though a
+            // single append can land the offset short of the new bottom.
+            if follow.engaged, !suppressFollow { scrollToBottom() }
             scheduleHeightReport(force: false)
             reportScrollState()
+        }
+
+        /// Pin to the end of the *text*, not to the end of the frame.
+        ///
+        /// `NSTextView.frame` covers only what TextKit 2 has actually laid out,
+        /// and measuring stops at `heightCeiling` — which a streamed result
+        /// crosses within a chunk or two — so from then on the frame trails the
+        /// real document badly (measured mid-stream: frame 432pt against a
+        /// document whose forced layout ends at 545pt). `scrollToEndOfDocument`
+        /// is frame-based, so it parks hundreds of points above the newest text,
+        /// and every later frame growth leaves the viewport stranded further
+        /// behind — or, when the frame is re-estimated the other way, snaps the
+        /// content upward. Asking for the range at the end instead makes AppKit
+        /// lay that text out and scroll to where it genuinely is.
+        ///
+        /// Still done twice: the pass after the run loop settles whatever layout
+        /// the first one kicked off. Both are flagged as ours so they can't
+        /// disengage the latch.
+        private func scrollToBottom() {
+            guard let textView, let storage = textView.textStorage else { return }
+            follow.duringProgrammaticScroll {
+                textView.scrollRangeToVisible(NSRange(location: storage.length, length: 0))
+            }
+            scheduleFollowCatchUp()
+        }
+
+        private func scheduleFollowCatchUp() {
+            guard !followCatchUpScheduled else { return }
+            followCatchUpScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.followCatchUpScheduled = false
+                guard self.follow.engaged, !self.suppressFollow,
+                      let textView = self.textView,
+                      let storage = textView.textStorage else { return }
+                self.follow.duringProgrammaticScroll {
+                    textView.scrollRangeToVisible(NSRange(location: storage.length, length: 0))
+                }
+                self.reportScrollState()
+            }
         }
 
         private func resetText() {
@@ -396,7 +534,8 @@ struct StreamingTextView: NSViewRepresentable {
                 with: ""
             )
             storage.endEditing()
-            textView.scroll(.zero) // new run starts at the top
+            follow.disengage() // a new run starts at the top, following nothing
+            follow.duringProgrammaticScroll { textView.scroll(.zero) }
             // A new run must pull the card back down to its floor, so this is one
             // of the two places a shorter measurement is real.
             lastReportedHeight = 0
@@ -522,6 +661,12 @@ struct PageReaderView: NSViewRepresentable {
         private var onScrollStateChange: ((Bool) -> Void)?
         private var lastJumpToken = 0
         private var lastReportedJumpVisible = false
+        private let follow = FollowLatch()
+        private var followCatchUpScheduled = false
+        /// Geometry at the last bounds notification, so a scroll caused by the
+        /// document or the viewport growing can be told from the reader's own.
+        private var lastObservedDocHeight: CGFloat = 0
+        private var lastObservedVisibleHeight: CGFloat = 0
 
         func setup(textView: NSTextView, onContentHeightChange: ((CGFloat) -> Void)?) {
             self.textView = textView
@@ -537,6 +682,30 @@ struct PageReaderView: NSViewRepresentable {
                     name: NSView.boundsDidChangeNotification, object: clip
                 )
             }
+            observeLiveScroll(on: textView.enclosingScrollView)
+        }
+
+
+        /// Live-scroll notifications are the one unambiguous "the reader did
+        /// this" signal: `NSScrollView` posts them for wheel, trackpad and
+        /// scroller-drag gestures, never for a programmatic scroll.
+        private func observeLiveScroll(on scrollView: NSScrollView?) {
+            guard let scrollView else { return }
+            for name in [
+                NSScrollView.didLiveScrollNotification,
+                NSScrollView.didEndLiveScrollNotification,
+            ] {
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(userLiveScrolled),
+                    name: name, object: scrollView
+                )
+            }
+        }
+
+        @objc private func userLiveScrolled() {
+            guard !suppressFollow else { return }
+            follow.userScrolled(atBottom: viewportState().atBottom)
+            reportScrollState()
         }
 
         // MARK: Follow-the-stream (same rules as the card coordinator)
@@ -551,14 +720,64 @@ struct PageReaderView: NSViewRepresentable {
             let increased = token > lastJumpToken
             lastJumpToken = token
             guard increased else { return }
+            follow.engage()
             DispatchQueue.main.async { [weak self] in
-                self?.textView?.scrollToEndOfDocument(nil)
+                self?.scrollToBottom()
                 self?.reportScrollState()
             }
         }
 
         @objc private func scrollBoundsChanged() {
+            classifyBoundsChange()
             reportScrollState()
+        }
+
+        /// See the card coordinator's twin: growth of the document or of the
+        /// viewport is layout, not the reader, and must not disengage the pin.
+        private func classifyBoundsChange() {
+            guard let textView, let clip = textView.enclosingScrollView?.contentView else { return }
+            let docHeight = textView.frame.height
+            let visibleHeight = clip.bounds.height
+            let geometryMoved = abs(docHeight - lastObservedDocHeight) > 0.5
+                || abs(visibleHeight - lastObservedVisibleHeight) > 0.5
+            lastObservedDocHeight = docHeight
+            lastObservedVisibleHeight = visibleHeight
+            // A window drag is neither: the controller restores the frozen
+            // offsets for the whole gesture, and against a document that keeps
+            // growing underneath, those restores would read as the reader
+            // scrolling away from the bottom and drop the pin.
+            guard !follow.isProgrammatic, !suppressFollow else { return }
+            if geometryMoved {
+                if follow.engaged { scheduleFollowCatchUp() }
+            } else {
+                follow.userScrolled(atBottom: viewportState().atBottom)
+            }
+        }
+
+        /// Pin to the end of the text — see the card coordinator's twin for why
+        /// the frame-based `scrollToEndOfDocument` lands short of the stream.
+        private func scrollToBottom() {
+            guard let textView, let storage = textView.textStorage else { return }
+            follow.duringProgrammaticScroll {
+                textView.scrollRangeToVisible(NSRange(location: storage.length, length: 0))
+            }
+            scheduleFollowCatchUp()
+        }
+
+        private func scheduleFollowCatchUp() {
+            guard !followCatchUpScheduled else { return }
+            followCatchUpScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.followCatchUpScheduled = false
+                guard self.follow.engaged, !self.suppressFollow,
+                      let textView = self.textView,
+                      let storage = textView.textStorage else { return }
+                self.follow.duringProgrammaticScroll {
+                    textView.scrollRangeToVisible(NSRange(location: storage.length, length: 0))
+                }
+                self.reportScrollState()
+            }
         }
 
         /// (overflowing, atBottom) for the current viewport. See the card
@@ -578,7 +797,8 @@ struct PageReaderView: NSViewRepresentable {
         private func reportScrollState() {
             guard let handler = onScrollStateChange else { return }
             let state = viewportState()
-            let jumpVisible = state.overflowing && !state.atBottom
+            // Hidden while following, for the same reason as in the cards.
+            let jumpVisible = state.overflowing && !state.atBottom && !follow.engaged
             guard jumpVisible != lastReportedJumpVisible else { return }
             lastReportedJumpVisible = jumpVisible
             DispatchQueue.main.async { handler(jumpVisible) }
@@ -645,7 +865,10 @@ struct PageReaderView: NSViewRepresentable {
             lastReportedHeight = 0
             reachedHeightCeiling = false
             allowsShrink = true
-            if resetScroll { textView.scroll(.zero) }
+            if resetScroll {
+                follow.disengage() // a new run starts at the top, following nothing
+                follow.duringProgrammaticScroll { textView.scroll(.zero) }
+            }
             scheduleHeightReport(force: true)
             reportScrollState()
         }
@@ -658,10 +881,8 @@ struct PageReaderView: NSViewRepresentable {
             // append-only TextKit path for every mode. Height fitting is
             // throttled and stops after the scroll ceiling, while glyphs still
             // land immediately so the visible stream is never incomplete.
-            let state = viewportState()
-            let follow = !suppressFollow && state.overflowing && state.atBottom
             applyProjection()
-            if follow { textView?.scrollToEndOfDocument(nil) }
+            if follow.engaged, !suppressFollow { scrollToBottom() }
             scheduleHeightReport(force: false)
             reportScrollState()
         }

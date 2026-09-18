@@ -16,7 +16,9 @@ struct InputSectionView: View {
     /// ceiling, past which the text scrolls inside the box. The panel's chrome
     /// measurement follows this, so the window grows/shrinks to match.
     private static let minEditorHeight: CGFloat = 60
-    private static let maxEditorHeight: CGFloat = 200
+    /// Shared with the result cards' auto ceiling (`PanelLayout.maxAutoBodyHeight`
+    /// is derived from it), so the input and a result top out together.
+    private static let maxEditorHeight: CGFloat = PanelLayout.maxInputHeight
     /// Horizontal inset for the measuring mirror: our `.padding(6)` plus the
     /// NSTextView text-container inset (~5), so the mirror wraps at the same
     /// width the editor does. Kept slightly generous so it over- rather than

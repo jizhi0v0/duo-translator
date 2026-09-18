@@ -1180,14 +1180,19 @@ enum PanelLayout {
     /// and the whole window oscillates. One line of headroom keeps a satisfied
     /// card's ceiling strictly above its content, so the classification has a
     /// fixed point.
-    /// Absolute ceiling on any card's *auto* body height: exactly seven text
-    /// lines, so every output tops out at the same familiar size no matter how
-    /// the budget is split (a lone claimant used to grow into a
-    /// near-fullscreen card). Built from the body metrics so a capped body
-    /// always cuts on a whole line; longer content scrolls inside. The
+    /// Ceiling the input editor grows to before it scrolls internally. Also the
+    /// reference for `maxAutoBodyHeight`, so the panel has one "this is as tall
+    /// as a text box gets here" number instead of two that drift apart.
+    static let maxInputHeight: CGFloat = 200
+
+    /// Absolute ceiling on any card's *auto* body height, so every output tops
+    /// out at the same familiar size no matter how the budget is split (a lone
+    /// claimant used to grow into a near-fullscreen card). Tied to the input's
+    /// own ceiling rather than a fixed line count — a result reads at least as
+    /// tall as what you can type — and snapped down to whole lines so a capped
+    /// body always cuts on a line boundary; longer content scrolls inside. The
     /// dragged divider still customizes per engine within this bound.
-    static let maxAutoBodyHeight: CGFloat =
-        bodyVInset * 2 + 7 * bodyLineHeight + 6 * bodyLineSpacing
+    static let maxAutoBodyHeight: CGFloat = lineAlignedBodyHeight(atMost: maxInputHeight)
 
     static func cardBodyCaps(
         needs: [CGFloat?], budget: CGFloat, cardChrome: CGFloat, floor: CGFloat,
