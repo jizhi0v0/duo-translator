@@ -979,9 +979,17 @@ final class PanelController: NSObject, NSWindowDelegate {
         for entry in offsets {
             guard let scrollView = entry.scrollView() else { continue }
             let clipView = scrollView.contentView
-            guard abs(clipView.bounds.origin.x - entry.origin.x) > 0.5
-                    || abs(clipView.bounds.origin.y - entry.origin.y) > 0.5 else { continue }
-            clipView.scroll(to: entry.origin)
+            // Through `constrainBoundsRect`, never the raw offset: the width
+            // change that prompted this is exactly what makes text rewrap
+            // *shorter*, so the saved offset can sit past the new end — and a
+            // scroll view parked past its document paints blank. That is the
+            // empty input box this restore was meant to prevent, arriving by
+            // the other road. AppKit's own clamp knows where the end is.
+            let target = NSRect(origin: entry.origin, size: clipView.bounds.size)
+            let origin = clipView.constrainBoundsRect(target).origin
+            guard abs(clipView.bounds.origin.x - origin.x) > 0.5
+                    || abs(clipView.bounds.origin.y - origin.y) > 0.5 else { continue }
+            clipView.scroll(to: origin)
             scrollView.reflectScrolledClipView(clipView)
         }
     }
