@@ -402,19 +402,31 @@ final class PanelController: NSObject, NSWindowDelegate {
                 frame.origin.x = visible.minX + Self.screenPadding
             }
         }
+        // A width change rewraps every text view in the panel, and AppKit
+        // answers that by scrolling the focused one to its insertion point —
+        // the source text jumped from its first line to wherever the caret was,
+        // or past the end into blank space, on every mode switch. Nothing about
+        // switching modes should move a reading position, so the offsets are
+        // snapshotted across the relayout, exactly as a window drag does.
+        let offsets = scrollOffsets()
         // Neither intermediate frame is displayed: `refit` applies a cached
         // target-mode height when available, then the newly-created SwiftUI /
         // AppKit subtree is laid out and painted before the next window flush.
         panel.setFrame(frame, display: false, animate: false)
         refit(display: false)
         panel.contentView?.layoutSubtreeIfNeeded()
+        restoreScrollOffsets(offsets)
         panel.contentView?.needsDisplay = true
         panel.displayIfNeeded()
         panel.invalidateShadow()
         // The mode swap (cards ↔ page view) and the width change both relayout
         // asynchronously; a deferred pass fits the height once the new content
         // has reported its geometry, so the switch settles without a second click.
-        DispatchQueue.main.async { [weak self] in self?.refit() }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.refit()
+            self.restoreScrollOffsets(offsets)
+        }
     }
 
     /// Accept only a measurement produced by the currently-visible mode. The
@@ -948,6 +960,28 @@ final class PanelController: NSObject, NSWindowDelegate {
             guard abs(clipView.bounds.origin.x - frozen.origin.x) > 0.5
                     || abs(clipView.bounds.origin.y - frozen.origin.y) > 0.5 else { continue }
             clipView.scroll(to: frozen.origin)
+            scrollView.reflectScrolledClipView(clipView)
+        }
+    }
+
+    /// Scroll offsets of every scroll view in the panel, held weakly: a mode
+    /// switch rebuilds the result subtree, so some of these are gone by the
+    /// time they are restored, and the survivors (the input editor above all)
+    /// are the ones whose position must not move.
+    private func scrollOffsets() -> [(scrollView: () -> NSScrollView?, origin: NSPoint)] {
+        guard let contentView = panel.contentView else { return [] }
+        return scrollViews(in: contentView).map { scrollView in
+            (scrollView: { [weak scrollView] in scrollView }, origin: scrollView.contentView.bounds.origin)
+        }
+    }
+
+    private func restoreScrollOffsets(_ offsets: [(scrollView: () -> NSScrollView?, origin: NSPoint)]) {
+        for entry in offsets {
+            guard let scrollView = entry.scrollView() else { continue }
+            let clipView = scrollView.contentView
+            guard abs(clipView.bounds.origin.x - entry.origin.x) > 0.5
+                    || abs(clipView.bounds.origin.y - entry.origin.y) > 0.5 else { continue }
+            clipView.scroll(to: entry.origin)
             scrollView.reflectScrolledClipView(clipView)
         }
     }
