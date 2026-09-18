@@ -32,17 +32,45 @@ struct StatsView: View {
 
     private var summary: some View {
         HStack(spacing: 16) {
-            tile("总请求", "\(store.records.count)")
-            tile("成功率", String(format: "%.0f%%", successRate * 100))
+            // Not "总请求": the store keeps only the most recent
+            // `StatsStore.maxRecords`, so once that many have gone through, this
+            // number stops moving and the label would be a lie.
+            tile("已记录请求", "\(store.records.count)",
+                 caption: store.isAtCapacity ? "最近 \(store.records.count) 次" : nil)
+            tile("成功率", successRateText, caption: failureCaption)
             tile("总 Token", totalTokens.map(compact) ?? "—")
             tile("平均延迟", String(format: "%.1fs", avgLatency))
         }
     }
 
-    private func tile(_ label: String, _ value: String) -> some View {
+    /// Rounded to whole percent only when nothing failed. With thousands of
+    /// records a single failure is 0.02%, and "%.0f%%" printed that as a clean
+    /// 100% — the rate looked perfect while the failures sat right there in the
+    /// store, invisible in the chart too (one bar segment in eight hundred).
+    private var successRateText: String {
+        let failures = store.records.count - successCount
+        if failures == 0 { return "100%" }
+        return String(format: "%.2f%%", successRate * 100)
+    }
+
+    /// The count is what actually tells you something once the rate rounds to
+    /// nothing: "4 次失败" is legible where "99.92%" is easy to skim past.
+    private var failureCaption: String? {
+        let failures = store.records.filter { $0.status == .failed }.count
+        let cancelled = store.records.filter { $0.status == .cancelled }.count
+        var parts: [String] = []
+        if failures > 0 { parts.append("失败 \(failures)") }
+        if cancelled > 0 { parts.append("取消 \(cancelled)") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func tile(_ label: String, _ value: String, caption: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.title2).monospacedDigit()
+            if let caption {
+                Text(caption).font(.caption2).foregroundStyle(.tertiary)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -101,10 +129,13 @@ struct StatsView: View {
 
     // MARK: - Aggregations
 
+    private var successCount: Int {
+        store.records.filter { $0.status == .success }.count
+    }
+
     private var successRate: Double {
         guard !store.records.isEmpty else { return 0 }
-        let ok = store.records.filter { $0.status == .success }.count
-        return Double(ok) / Double(store.records.count)
+        return Double(successCount) / Double(store.records.count)
     }
 
     private var totalTokens: Int? {

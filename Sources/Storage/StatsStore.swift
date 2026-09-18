@@ -41,6 +41,11 @@ final class StatsStore: ObservableObject {
     @Published private(set) var records: [TranslationRecord] = []
 
     private let maxRecords = 5000
+
+    /// The store is a rolling window, so a full one means the count on screen
+    /// is "the most recent N", not a lifetime total. The stats view says so
+    /// rather than labelling a pinned number 总请求.
+    var isAtCapacity: Bool { records.count >= maxRecords }
     private let fileURL: URL
 
     init(fileURL: URL? = nil) {
