@@ -25,6 +25,12 @@ struct PageModeView: View {
     /// Jump-to-latest affordance state, mirroring the result cards.
     @State private var canJumpToBottom = false
     @State private var jumpToken = 0
+    /// Output height as last laid out outside a window drag. The drag freezes
+    /// the window's height while the stream keeps growing `contentHeight`; an
+    /// output that kept growing with it made the page taller than the frozen
+    /// window, which pushed the toolbar and input off the top for the whole
+    /// hold. Same freeze as the cards' `layoutFrozen`.
+    @State private var lastOutputDisplayed: CGFloat?
 
     private static let outputFloor: CGFloat = 80
 
@@ -39,7 +45,10 @@ struct PageModeView: View {
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { selectorHeight = $0 }
 
             outputBody
-                .frame(height: outputDisplayed)
+                .frame(height: outputFrameHeight)
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { height in
+                    if !viewModel.windowDragActive { lastOutputDisplayed = height }
+                }
                 .overlay(alignment: .bottomTrailing) {
                     if canJumpToBottom, selectedIsStreaming {
                         FollowStreamButton(identifier: "page.followStream") {
@@ -106,6 +115,9 @@ struct PageModeView: View {
             floor: Self.outputFloor,
             cap: outputCap
         )
+    }
+    private var outputFrameHeight: CGFloat {
+        viewModel.windowDragActive ? (lastOutputDisplayed ?? outputDisplayed) : outputDisplayed
     }
     private var reportedHeight: CGFloat { selectorHeight + outputDisplayed }
 
