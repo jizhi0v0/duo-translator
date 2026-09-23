@@ -934,6 +934,16 @@ final class PanelController: NSObject, NSWindowDelegate {
             guard let self, self.windowDragGeneration == generation else { return }
             self.viewModel.windowDragActive = false
             self.panel.contentView?.layoutSubtreeIfNeeded()
+            // Page mode's reported height was never frozen — only its output
+            // frame was — so the fit already has the final number. Fit in this
+            // same turn: waiting for the next one left the unfrozen, taller page
+            // inside the still-short window for a frame, pushing the toolbar
+            // and input off the top — a flash on every release.
+            if self.viewModel.pageMode {
+                self.windowDragPhase = .idle
+                self.refit()
+                self.windowDragPhase = .settling
+            }
             self.restoreScrollPositions()
 
             // Geometry preferences arrive after that SwiftUI pass. Hold every

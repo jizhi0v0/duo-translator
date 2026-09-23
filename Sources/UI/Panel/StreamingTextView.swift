@@ -102,9 +102,16 @@ final class FollowLatch {
     func engage() { engaged = true }
 
     /// A scroll the reader performed (wheel, trackpad, scroller, keyboard).
-    func userScrolled(atBottom: Bool) {
+    ///
+    /// Only an overflowing body has a bottom to reach. Text that still fits
+    /// reads as "at the bottom" at any offset, so any bounds change that slips
+    /// through as the reader's — the window drag's scroll restore — latched
+    /// following on a short card; the first overflowing line then pinned the
+    /// viewport to the end while the card's height caught up a frame later,
+    /// flickering the body between clipped-at-top and back.
+    func userScrolled(_ viewport: (overflowing: Bool, atBottom: Bool)) {
         guard !isProgrammatic else { return }
-        engaged = atBottom
+        engaged = viewport.overflowing && viewport.atBottom
     }
 
     func duringProgrammaticScroll(_ body: () -> Void) {
@@ -291,7 +298,7 @@ struct StreamingTextView: NSViewRepresentable {
 
         @objc private func userLiveScrolled() {
             guard !suppressFollow else { return }
-            follow.userScrolled(atBottom: viewportState().atBottom)
+            follow.userScrolled(viewportState())
             reportScrollState()
         }
 
@@ -342,7 +349,7 @@ struct StreamingTextView: NSViewRepresentable {
             if geometryMoved {
                 if follow.engaged { scheduleFollowCatchUp() }
             } else {
-                follow.userScrolled(atBottom: viewportState().atBottom)
+                follow.userScrolled(viewportState())
             }
         }
 
@@ -735,7 +742,7 @@ struct PageReaderView: NSViewRepresentable {
 
         @objc private func userLiveScrolled() {
             guard !suppressFollow else { return }
-            follow.userScrolled(atBottom: viewportState().atBottom)
+            follow.userScrolled(viewportState())
             reportScrollState()
         }
 
@@ -781,7 +788,7 @@ struct PageReaderView: NSViewRepresentable {
             if geometryMoved {
                 if follow.engaged { scheduleFollowCatchUp() }
             } else {
-                follow.userScrolled(atBottom: viewportState().atBottom)
+                follow.userScrolled(viewportState())
             }
         }
 
