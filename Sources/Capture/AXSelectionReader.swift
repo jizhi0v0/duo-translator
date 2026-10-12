@@ -103,9 +103,13 @@ enum AXSelectionReader {
         else { return false }
         var element = focusedRef as! AXUIElement
         // The selection's focused element is often a text node whose web area is
-        // an ancestor; walk up a few levels looking for it.
-        for _ in 0..<6 {
-            if stringAttribute(of: element, kAXRoleAttribute) == "AXWebArea" { return true }
+        // an ancestor. React apps nest deeply (Claude desktop puts it ~25 levels
+        // up), so walk up to the window rather than a fixed few levels; the cap
+        // only guards against a cyclic parent chain.
+        for _ in 0..<64 {
+            let role = stringAttribute(of: element, kAXRoleAttribute)
+            if role == "AXWebArea" { return true }
+            if role == kAXWindowRole { return false }
             var parentRef: CFTypeRef?
             guard AXUIElementCopyAttributeValue(
                 element, kAXParentAttribute as CFString, &parentRef

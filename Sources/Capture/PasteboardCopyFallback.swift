@@ -23,7 +23,9 @@ enum PasteboardCopyFallback {
             guard pasteboard.changeCount != previousChangeCount else { continue }
             let text = pasteboard.string(forType: .string)
             if let text, !text.isEmpty, !CapturedTextSanitizer.containsReplacementCharacter(text) {
-                copied = text
+                // Web views drop list markers from the plain-text flavor; the
+                // HTML flavor written alongside still has them.
+                copied = pasteboard.string(forType: .html).flatMap(HTMLListText.text(fromHTML:)) ?? text
                 break
             }
             copied = text ?? copied
